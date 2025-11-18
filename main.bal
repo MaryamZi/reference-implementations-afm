@@ -40,11 +40,12 @@ public function main(string filePath, string? input = ()) returns error? {
         panic error("No HTTP exposure defined for service agent");
     }
 
-    http:Listener ln = check new (8080);
+    http:Listener ln = check new (8085);
     http:Service httpService = check new HttpService(afm);
     check ln.attach(httpService, httpExposure.path);
     check ln.start();
     runtime:registerListener(ln);
+    log:printInfo("HTTP service started at path: " + httpExposure.path);
 }
 
 type AgentConfiguration record {|
