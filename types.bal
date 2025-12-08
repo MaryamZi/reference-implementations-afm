@@ -1,3 +1,19 @@
+// Copyright (c) 2024, WSO2 LLC. (https://www.wso2.com).
+//
+// WSO2 LLC. licenses this file to you under the Apache License,
+// Version 2.0 (the "License"); you may not use this file except
+// in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied. See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 type Provider record {|
     string organization?;
     string url?;
@@ -21,9 +37,9 @@ type StdIoTransport record {|
 
 type Transport HttpTransport|StdIoTransport;
 
-type Authentication record {|
+type ClientAuthentication record {
     string 'type;
-|};
+};
 
 type ToolFilter record {|
     string[] allow?;
@@ -33,7 +49,7 @@ type ToolFilter record {|
 type MCPServer record {|
     string name;
     Transport transport;
-    Authentication authentication?;
+    ClientAuthentication authentication?;
     ToolFilter tool_filter?;
 |};
 
@@ -76,7 +92,7 @@ type Signature record {|
 
 type HTTPExposure record {|
     string path;
-    Authentication authentication?;
+    // ClientAuthentication authentication?;
 |};
 
 type AgentCard record {|
@@ -97,8 +113,19 @@ type Exposure record {|
 
 enum InterfaceType {
     SERVICE = "service",
-    FUNCTION = "function"
+    FUNCTION = "function",
+    CHAT = "chat",
+    WEBHOOK = "webhook"
 }
+
+type Subscription record {|
+    string protocol;
+    string hub;
+    string topic;
+    string callback?;
+    string secret?;
+    ClientAuthentication authentication?;
+|};
 
 type ServiceInterface record {|
     SERVICE 'type = SERVICE;
@@ -111,9 +138,23 @@ type FunctionInterface record {|
     Signature signature = {};
 |};
 
-type Interface ServiceInterface|FunctionInterface;
+type ChatInterface record {|
+    CHAT 'type = CHAT;
+    Signature signature = {};
+    Exposure exposure;
+|};
+
+type WebhookInterface record {|
+    WEBHOOK 'type = WEBHOOK;
+    Signature signature = {};
+    Exposure exposure;
+    Subscription subscription;
+|};
+
+type Interface ServiceInterface|FunctionInterface|ChatInterface|WebhookInterface;
 
 type AgentMetadata record {|
+    string spec_version?;
     string name?;
     string description?;
     string 'version?;
@@ -125,6 +166,7 @@ type AgentMetadata record {|
     string license?;
     Interface interface = <FunctionInterface>{};
     Tools tools?;
+    int max_iterations?;
 |};
 
 type AFMRecord record {|
