@@ -352,8 +352,7 @@ function createAgent(AFMRecord afmRecord) returns ai:Agent|error {
         tools: mcpToolkits,
         model: check new ai:Wso2ModelProvider(
             "https://dev-tools.wso2.com/ballerina-copilot/v2.0",
-            accessToken),
-        verbose: true
+            accessToken)
     };
     
     int? maxIterations = metadata?.max_iterations;
@@ -374,42 +373,11 @@ function createAgentWithSchema(AFMRecord afmRecord) returns AgentWithSchema|erro
     ai:Agent agent = check createAgent(afmRecord);
 
     Signature signature = check metadata?.interface?.signature.ensureType();
-    map<json> & readonly inputSchema = transformToJsonObjectSchema(signature.input);
-    map<json> & readonly outputSchema = transformToJsonObjectSchema(signature.output);
+    
+    map<json> & readonly inputSchema = signature.input.cloneReadOnly();
+    map<json> & readonly outputSchema = signature.output.cloneReadOnly();
 
     return {inputSchema, outputSchema, agent};
-}
-
-function transformToJsonObjectSchema(Parameter[] params) returns map<json> & readonly {
-    map<json> properties = {};
-    string[] requiredFields = [];
-    
-    foreach Parameter param in params {
-        map<json> paramSchema = {};
-        paramSchema["type"] = param.'type;
-        if param.description is string {
-            paramSchema["description"] = param.description;
-        }
-        string paramName = param.name;
-        properties[paramName] = paramSchema;
-        
-        boolean isRequired = let boolean? required = param.required in
-            required is boolean ? required : false;
-        if isRequired {
-            requiredFields.push(paramName);
-        }
-    }
-    
-    map<json> schema = {
-        "type": "object",
-        "properties": properties.cloneReadOnly()
-    };
-    
-    if requiredFields.length() > 0 {
-        schema["required"] = requiredFields.cloneReadOnly();
-    }
-    
-    return schema.cloneReadOnly();
 }
 
 function runAgent(ai:Agent agent, json payload, map<json>? inputSchema = (), map<json>? outputSchema = ()) 
@@ -419,13 +387,32 @@ function runAgent(ai:Agent agent, json payload, map<json>? inputSchema = (), map
         log:printError("Invalid input payload", 'error = validateJsonSchemaResult);
         return error InputError("Invalid input payload");
     }
-    
+
+    boolean isUpdatedSchema = false;
+    map<json>? effectiveOutputSchema = outputSchema;
+
+    if outputSchema is map<json> {
+        string|error schemaType = outputSchema["type"].ensureType();
+        if schemaType is error {
+            log:printError("Invalid output schema", 'error = schemaType);
+            return error AgentError("Invalid output schema, expected a 'type' field", schemaType);
+        }
+
+        if schemaType !is "object"|"array" {
+            effectiveOutputSchema = {
+                "type": "object",
+                "properties": { "value": { "type": schemaType } },
+                "required": ["value"]
+            };
+            isUpdatedSchema = true;
+        }
+    }
     string|ai:Error run = agent.run(
         string `${payload.toJsonString()}
         
-        ${inputSchema is map<json> ? 
+        ${effectiveOutputSchema is map<json> ? 
         string `The final response MUST conform to the following JSON schema: ${
-            outputSchema.toJsonString()}` : ""}
+            effectiveOutputSchema.toJsonString()}` : ""}
 
         Respond only with the value enclosed between ${"```json"} and ${"```"}.
         `);
@@ -436,8 +423,11 @@ function runAgent(ai:Agent agent, json payload, map<json>? inputSchema = (), map
     }
 
     string responseJsonStr = run;
-    if run.startsWith("```json") && run.endsWith("```") {
-        responseJsonStr = run.substring(7, run.length() - 3);
+    
+    int? lastJsonStart = run.lastIndexOf("```json");
+    int? lastJsonEnd = run.lastIndexOf("```");
+    if lastJsonStart is int && lastJsonEnd is int && lastJsonEnd > lastJsonStart {
+        responseJsonStr = run.substring(lastJsonStart + 7, lastJsonEnd).trim();
     }
 
     json|error responseJson = responseJsonStr.fromJsonString();
@@ -447,12 +437,12 @@ function runAgent(ai:Agent agent, json payload, map<json>? inputSchema = (), map
         return error AgentError("Failed to parse agent response JSON");
     }
 
-    error? validateOutputSchemaResult = validateJsonSchema(outputSchema, responseJson);
+    error? validateOutputSchemaResult = validateJsonSchema(effectiveOutputSchema, responseJson);
     if validateOutputSchemaResult is error {
         log:printError("Agent response does not conform to output schema", 'error = validateOutputSchemaResult);
         return error AgentError("Agent response does not conform to output schema", validateOutputSchemaResult);
     }
-    return responseJson;
+    return isUpdatedSchema ? (<map<json>> responseJson).get("value") : responseJson;
 }
 
 isolated function validateJsonSchema(map<json>? jsonSchemaVal, json sampleJson) returns error? {
@@ -460,25 +450,36 @@ isolated function validateJsonSchema(map<json>? jsonSchemaVal, json sampleJson) 
         return ();
     }
 
-    // Create JSONObject from schema
-    validator:JSONObject schemaObject = validator:newJSONObject7(jsonSchemaVal.toJsonString());
-    
-    // Build the schema using SchemaLoader
+    string schemaType = check jsonSchemaVal["type"].ensureType();
+    if schemaType == "object" {
+        validator:JSONObject schemaObject = validator:newJSONObject7(jsonSchemaVal.toJsonString());
+        validator:SchemaLoaderBuilder builder = validator:newSchemaLoaderBuilder1();
+        validator:SchemaLoader schemaLoader = builder.schemaJson(schemaObject).build();
+        validator:Schema schema = schemaLoader.load().build();
+        validator:JSONObject jsonObject = validator:newJSONObject7(sampleJson.toJsonString());
+        error? validationResult = trap schema.validate(jsonObject);
+        if validationResult is error {
+            return error("JSON validation failed: " + validationResult.message());
+        }
+        return (); 
+    }
+
+    // Wrap value and validate using generated object schema
+    map<json> valueSchema = {
+        "type": "object",
+        "properties": { "value": { "type": schemaType } },
+        "required": ["value"]
+    };
+    validator:JSONObject schemaObject = validator:newJSONObject7(valueSchema.toJsonString());
     validator:SchemaLoaderBuilder builder = validator:newSchemaLoaderBuilder1();
     validator:SchemaLoader schemaLoader = builder.schemaJson(schemaObject).build();
     validator:Schema schema = schemaLoader.load().build();
-    
-    // Create JSONObject from the JSON to validate
-    validator:JSONObject jsonObject = validator:newJSONObject7(sampleJson.toJsonString());
-    
-    // Validate - throws ValidationException if invalid
+    map<json> wrapped = { "value": sampleJson };
+    validator:JSONObject jsonObject = validator:newJSONObject7(wrapped.toJsonString());
     error? validationResult = trap schema.validate(jsonObject);
-    
     if validationResult is error {
         return error("JSON validation failed: " + validationResult.message());
     }
-    
-    return ();
 }
 
 function mapToHttpClientAuth(ClientAuthentication? auth) returns http:ClientAuthConfig|error? {

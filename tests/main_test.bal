@@ -18,18 +18,26 @@ function testParseAfm() returns error? {
             interface: <FunctionInterface>{
                 'type: "function",
                 signature: {
-                    input: [{
-                        name: "user_prompt",
-                        'type: "string",
-                        description: "Prompt from user.",
-                        required: true
-                    }],
-                    output: [{
-                        name: "response",
-                        'type: "string",
-                        description: "Agent response.",
-                        required: true
-                    }]
+                    input: {
+                        'type: "object",
+                        properties: {
+                            user_prompt: {
+                                'type: "string",
+                                description: "Prompt from user."
+                            }
+                        },
+                        required: ["user_prompt"]
+                    },
+                    output: {
+                        'type: "object",
+                        properties: {
+                            response: {
+                                'type: "string",
+                                description: "Agent response."
+                            }
+                        },
+                        required: ["response"]
+                    }
                 }
             },
             tools: {

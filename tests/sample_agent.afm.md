@@ -13,15 +13,19 @@ interface:
   type: function
   signature:
     input:
-      - name: user_prompt
-        type: string
-        description: Prompt from user.
-        required: true
+      type: object
+      properties:
+        user_prompt:
+          type: string
+          description: Prompt from user.
+      required: [user_prompt]
     output:
-      - name: response
-        type: string
-        description: Agent response.
-        required: true
+      type: object
+      properties:
+        response:
+          type: string
+          description: Agent response.
+      required: [response]
 tools:
   mcp:
     servers:
