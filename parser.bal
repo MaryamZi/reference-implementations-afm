@@ -15,11 +15,10 @@
 // under the License.
 
 import ballerina/data.yaml;
-import ballerina/log;
 import ballerina/os;
 
 function parseAfm(string content) returns AFMRecord|error {
-    string resolvedContent = resolveVariables(content);
+    string resolvedContent = check resolveVariables(content);
     
     string[] lines = splitLines(resolvedContent);
     int length = lines.length();
@@ -77,9 +76,9 @@ function parseAfm(string content) returns AFMRecord|error {
     };
 }
 
-function resolveVariables(string content) returns string {
+function resolveVariables(string content) returns string|error {
     string result = content;
-    
+
     // Simple iterative approach to find and replace ${VAR} patterns
     int startPos = 0;
     while true {
@@ -87,29 +86,60 @@ function resolveVariables(string content) returns string {
         if dollarPos is () {
             break;
         }
-        
+
         int? closeBracePos = result.indexOf("}", dollarPos);
         if closeBracePos is () {
             break;
         }
-        
-        // Extract variable name
-        string varName = result.substring(dollarPos + 2, closeBracePos);
-        
-        // Try to resolve from environment
-        string? envValue = os:getEnv(varName);
-        if envValue is string {
-            // Replace the variable with its value
-            string before = result.substring(0, dollarPos);
-            string after = result.substring(closeBracePos + 1);
-            result = before + envValue + after;
-            startPos = before.length() + envValue.length();
-        } else {
-            log:printError(string `Variable ${varName} not found in environment`);
-            startPos = closeBracePos + 1;
+
+        // Check if this variable is in a commented line (YAML comment: #)
+        // Find the start of the line containing this variable
+        int lineStart = dollarPos;
+        while lineStart > 0 && result[lineStart - 1] != "\n" {
+            lineStart -= 1;
         }
+
+        // Check if the line starts with # (after whitespace)
+        string linePrefix = result.substring(lineStart, dollarPos).trim();
+        if linePrefix.startsWith("#") {
+            // Skip variables in commented lines
+            startPos = closeBracePos + 1;
+            continue;
+        }
+
+        // Extract variable expression (e.g., "VAR", "env:VAR", "file:path")
+        string varExpr = result.substring(dollarPos + 2, closeBracePos);
+
+        // Parse prefix and value
+        string prefix = "";
+        string varName = varExpr;
+        int? colonPos = varExpr.indexOf(":");
+        if colonPos is int {
+            prefix = varExpr.substring(0, colonPos);
+            varName = varExpr.substring(colonPos + 1);
+        }
+
+        // Resolve based on prefix
+        string resolvedValue;
+        if prefix == "" || prefix == "env" {
+            // No prefix or env: prefix -> environment variable
+            string? envValue = os:getEnv(varName);
+            if envValue is () || envValue == "" {
+                return error(string `Environment variable '${varName}' not found`);
+            }
+            resolvedValue = envValue;
+        } else {
+            // Unsupported prefix - return error
+            return error(string `Unsupported variable prefix '${prefix}:' in '${varExpr}'. Only 'env:' is supported.`);
+        }
+
+        // Replace the variable with its value
+        string before = result.substring(0, dollarPos);
+        string after = result.substring(closeBracePos + 1);
+        result = before + resolvedValue + after;
+        startPos = before.length() + resolvedValue.length();
     }
-    
+
     return result;
 }
 

@@ -54,7 +54,10 @@ public function main(string filePath) returns error? {
         http:Listener ln = check new (port);
         httpListener = ln;
         check attachChatService(ln, agent, webChatInterface, httpExposure);
-        log:printInfo(string `Attached webchat interface at path: ${httpExposure.path}`);
+        log:printInfo(string `Attached web chat interface at path: ${httpExposure.path}`);
+
+        check attachWebChatUIService(ln, httpExposure.path);
+        log:printInfo("Attached web chat UI at path: /");
     }
 
     if webhookInterface is WebhookInterface {
