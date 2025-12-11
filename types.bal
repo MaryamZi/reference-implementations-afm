@@ -15,27 +15,25 @@
 // under the License.
 
 type Provider record {|
-    string organization?;
+    string name?;
     string url?;
 |};
 
+type Model record {|
+    string name?;
+    string url?;
+    ClientAuthentication authentication?;
+|};
+
 enum TransportType {
-    HTTP_SSE = "http_sse",
-    STDIO = "stdio",
-    STREAMABLE_HTTP = "streamable_http"
+    http
 }
 
-type HttpTransport record {|
-    HTTP_SSE|STREAMABLE_HTTP 'type;
+type Transport record {|
+    http 'type = http;
     string url;
+    ClientAuthentication authentication?;
 |};
-
-type StdIoTransport record {|
-    STDIO 'type;
-    string command;
-|};
-
-type Transport HttpTransport|StdIoTransport;
 
 type ClientAuthentication record {
     string 'type;
@@ -49,27 +47,12 @@ type ToolFilter record {|
 type MCPServer record {|
     string name;
     Transport transport;
-    ClientAuthentication authentication?;
     ToolFilter tool_filter?;
 |};
 
-type MCPConnections record {|
-    MCPServer[] servers;
-|};
-
-type A2APeer record {|
-    string name;
-    string endpoint;
-|};
-
-type A2AConnections record {|
-    A2APeer[] peers?;
-|};
-
 type Tools record {|
-    MCPConnections mcp?;
+    MCPServer[] mcp?;
 |};
-
 
 type Parameter record {| 
     string name;
@@ -80,15 +63,10 @@ type Parameter record {|
 
 type JSONSchema record {| 
     string 'type;
-    // For object type
     map<JSONSchema>? properties?;
     string[]? required?;
-    // For array type
     JSONSchema? items?;
-    // For string/number/boolean types, can add more fields as needed
     string? description?;
-    // // Allow additional fields for extensibility
-    // map<json>? additionalProperties?;
 |};
 
 type Signature record {| 
@@ -98,29 +76,27 @@ type Signature record {|
 
 type HTTPExposure record {|
     string path;
-    // ClientAuthentication authentication?;
 |};
 
-type AgentCard record {|
-    string name?;
-    string description?;
-    string icon?;
-|};
+// type AgentCard record {|
+//     string name?;
+//     string description?;
+//     string icon?;
+// |};
 
-type A2AExposure record {|
-    boolean discoverable?;
-    AgentCard agent_card?;
-|};
+// type A2AExposure record {|
+//     boolean discoverable?;
+//     AgentCard agent_card?;
+// |};
 
 type Exposure record {|
     HTTPExposure http?;
-    A2AExposure a2a?;
+    // A2AExposure a2a?;
 |};
 
 enum InterfaceType {
-    SERVICE = "service",
-    FUNCTION = "function",
-    CHAT = "chat",
+    CONSOLE_CHAT = "consolechat",
+    WEB_CHAT = "webchat",
     WEBHOOK = "webhook"
 }
 
@@ -133,44 +109,38 @@ type Subscription record {|
     ClientAuthentication authentication?;
 |};
 
-type ServiceInterface record {|
-    SERVICE 'type = SERVICE;
+type WebChatInterface record {|
+    WEB_CHAT 'type = WEB_CHAT;
     Signature signature = {};
-    Exposure exposure;
+    Exposure exposure = {http: {path: "/chat"}};
 |};
 
-type FunctionInterface record {|
-    FUNCTION 'type = FUNCTION;
+type ConsoleChatInterface record {|
+    CONSOLE_CHAT 'type = CONSOLE_CHAT;
     Signature signature = {};
-|};
-
-type ChatInterface record {|
-    CHAT 'type = CHAT;
-    Signature signature = {};
-    Exposure exposure;
 |};
 
 type WebhookInterface record {|
     WEBHOOK 'type = WEBHOOK;
     Signature signature = {};
-    Exposure exposure;
+    Exposure exposure = {http: {path: "/webhook"}};
     Subscription subscription;
 |};
 
-type Interface ServiceInterface|FunctionInterface|ChatInterface|WebhookInterface;
+type Interface WebChatInterface|ConsoleChatInterface|WebhookInterface;
 
 type AgentMetadata record {|
     string spec_version?;
     string name?;
     string description?;
     string 'version?;
-    string namespace?;
     string author?;
     string[] authors?;
-    string iconUrl?;
+    string icon_url?;
     Provider provider?;
     string license?;
-    Interface interface = <FunctionInterface>{};
+    Model model?;
+    Interface[] interfaces?;
     Tools tools?;
     int max_iterations?;
 |};

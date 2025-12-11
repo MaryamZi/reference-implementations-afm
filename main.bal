@@ -32,7 +32,7 @@ const FRONTMATTER_DELIMITER = "---";
 type InputError distinct error;
 type AgentError distinct error;
 
-public function main(string filePath, string? input = ()) returns error? {
+public function main(string filePath) returns error? {
     log:printInfo(string `Starting AFM agent from file: ${filePath}`);
 
     string content = check io:fileReadString(filePath);
@@ -41,55 +41,100 @@ public function main(string filePath, string? input = ()) returns error? {
 
     AgentMetadata metadata = afm.metadata;
 
-    Interface interface = metadata.interface;
+    Interface[] agentInterfaces = metadata.interfaces ?: [<ConsoleChatInterface>{}];
 
-    if interface is FunctionInterface {
-        if input is () {
-            return error("Input must be provided when running an AFM function interface");
+    var [consoleChatInterface, webChatInterface, webhookInterface] = 
+                        check validateAndExtractInterfaces(agentInterfaces);
+
+    // Create a single shared agent instance for all interfaces
+    ai:Agent agent = check createAgent(afm);
+
+    // Start all service-based interfaces first (non-blocking)
+    http:Listener? httpListener = ();
+    websub:Listener? websubListener = ();
+
+    if webChatInterface is WebChatInterface {
+        HTTPExposure httpExposure = webChatInterface.exposure.http ?: {path: "/chat"};
+
+        http:Listener ln = check new (port);
+        httpListener = ln;
+        check attachChatService(ln, agent, webChatInterface, httpExposure);
+        log:printInfo(string `Attached webchat interface at path: ${httpExposure.path}`);
+    }
+
+    if webhookInterface is WebhookInterface {
+        HTTPExposure httpExposure = webhookInterface.exposure.http ?: {path: "/webhook"};
+
+        websub:Listener ln = check new websub:Listener(
+            httpListener is () ? port : httpListener);
+        websubListener = ln;
+        check attachWebhookService(ln, agent, webhookInterface, httpExposure);
+        log:printInfo(string `Attached webhook interface at path: ${httpExposure.path}`);
+    }
+
+    if websubListener is websub:Listener {
+        check websubListener.start();
+        runtime:registerListener(websubListener);
+        log:printInfo(string `WebSub server started on port ${port}`);
+    } if httpListener is http:Listener {
+        check httpListener.start();
+        runtime:registerListener(httpListener);
+        log:printInfo(string `HTTP server started on port ${port}`);
+    }
+
+    // Run consolechat last (it's blocking/interactive)
+    if consoleChatInterface is ConsoleChatInterface {
+        log:printInfo("Starting interactive consolechat interface");
+        return runInteractiveChat(agent);
+    }
+}
+
+function validateAndExtractInterfaces(Interface[] interfaces) 
+        returns [ConsoleChatInterface?, WebChatInterface?, WebhookInterface?]|error {
+    int consoleChatCount = 0;
+    int webChatCount = 0;
+    int webhookCount = 0;
+
+    ConsoleChatInterface? consoleChatInterface = ();
+    WebChatInterface? webChatInterface = ();
+    WebhookInterface? webhookInterface = ();
+
+    foreach Interface interface in interfaces {
+        if interface is ConsoleChatInterface {
+            consoleChatCount += 1;
+            consoleChatInterface = interface;
+        } else if interface is WebChatInterface {
+            webChatCount += 1;
+            webChatInterface = interface;
+        } else {
+            webhookCount += 1;
+            webhookInterface = interface;
         }
-        return createAndRunAgentAsFunction(afm, input);
     }
 
-    Exposure exposure = interface.exposure;
-
-    if exposure.a2a is A2AExposure {
-        log:printWarn("A2A exposure configured but not yet supported; continuing with HTTP/Webhook exposure only");
+    if consoleChatCount > 1 || webChatCount > 1 || webhookCount > 1 {
+        return error("Multiple interfaces of the same type are not supported");
     }
 
-    HTTPExposure? httpExposure = exposure.http;
-    if httpExposure is () {
-        return error(string `No HTTP exposure defined for ${interface.'type} agent`);
-    }
-
-    if interface is ChatInterface|ServiceInterface {
-        return createAndExposeAgentAsService(interface, afm, httpExposure);
-    }
-
-    return createAndExposeAgentAsWebhook(interface, afm, httpExposure);
+    return [consoleChatInterface, webChatInterface, webhookInterface];
 }
 
-function createAndExposeAgentAsService(ChatInterface|ServiceInterface interface, AFMRecord afm, HTTPExposure httpExposure) returns error? {
-    http:Listener ln = check new (port);
-    http:Service httpService = check new HttpService(afm);
-    check ln.attach(httpService, httpExposure.path);
-    check ln.start();
-    runtime:registerListener(ln);
-    log:printInfo(string `HTTP ${interface.'type} agent started at path: ${httpExposure.path}`);    
+function attachChatService(http:Listener httpListener, ai:Agent agent, WebChatInterface webChatInterface, HTTPExposure httpExposure) returns error? {
+    http:Service httpService = check new HttpService(agent, webChatInterface);
+    return httpListener.attach(httpService, httpExposure.path);
 }
 
-function createAndExposeAgentAsWebhook(WebhookInterface interface, AFMRecord afm, HTTPExposure httpExposure) returns error? {
-    Subscription subscription = interface.subscription;
+function attachWebhookService(websub:Listener websubListener, ai:Agent agent, WebhookInterface webhookInterface, HTTPExposure httpExposure) returns error? {
+    Subscription subscription = webhookInterface.subscription;
     log:printInfo(string `Webhook subscription configured: ${subscription.protocol} protocol`);
-    
+
     // Doesn't work due to a bug.
     // Subscription {hub, topic, callback, secret, authentication} = subscription;
 
-    final ai:Agent agent = check createAgent(afm); 
-    
     // Can't specify inline due to a bug.
     http:ClientAuthConfig? auth = check mapToHttpClientAuth(subscription.authentication);
 
-    websub:SubscriberService webhookService = 
+    websub:SubscriberService webhookService =
         @websub:SubscriberServiceConfig {
             target: [subscription.hub, subscription.topic],
             secret: subscription.secret,
@@ -99,7 +144,7 @@ function createAndExposeAgentAsWebhook(WebhookInterface interface, AFMRecord afm
             callback: subscription.callback
         }
         isolated service object {
-            remote function onEventNotification(readonly & websub:ContentDistributionMessage msg) 
+            remote function onEventNotification(readonly & websub:ContentDistributionMessage msg)
                     returns websub:Acknowledgement|error {
                 // TODO: revisit the result handling
                 json result = check runAgent(agent, msg.content.toJson());
@@ -108,11 +153,7 @@ function createAndExposeAgentAsWebhook(WebhookInterface interface, AFMRecord afm
             }
         };
 
-    websub:Listener ln = check new (port);
-    check ln.attach(webhookService, httpExposure.path);
-    check ln.start();
-    runtime:registerListener(ln);
-    log:printInfo(string `Webhook listener started at path: ${httpExposure.path}`);
+    check websubListener.attach(webhookService, httpExposure.path);
 }
 
 type AgentWithSchema record {|
@@ -121,11 +162,85 @@ type AgentWithSchema record {|
     ai:Agent agent;
 |};
 
-function createAndRunAgentAsFunction(AFMRecord afmRecord, string input) returns error? {
-    AgentWithSchema {inputSchema, outputSchema, agent} = check createAgentWithSchema(afmRecord);
-    // TODO: Ignore result?
-    json result = check runAgent(agent, check input.fromJsonString(), inputSchema, outputSchema);
-    io:println(result);
+function runInteractiveChat(ai:Agent agent) returns error? {
+    printWelcomeBanner();
+
+    int messageCount = 0;
+    while true {
+        // Read user input with enhanced prompt
+        io:print("\n> ");
+        string userInput = io:readln();
+
+        // Check for special commands
+        string trimmedInput = userInput.trim();
+        if trimmedInput == "" {
+            continue;
+        }
+
+        // Handle special commands
+        if trimmedInput.toLowerAscii() == "exit" || trimmedInput.toLowerAscii() == "quit" {
+            printGoodbyeMessage(messageCount);
+            break;
+        }
+
+        if trimmedInput.toLowerAscii() == "help" || trimmedInput == "?" {
+            printHelpMessage();
+            continue;
+        }
+
+        if trimmedInput.toLowerAscii() == "clear" || trimmedInput.toLowerAscii() == "cls" {
+            clearScreen();
+            printWelcomeBanner();
+            continue;
+        }
+
+        // Show thinking indicator
+        io:print("[Thinking...]");
+
+        // Run the agent
+        string|ai:Error response = agent.run(userInput);
+
+        // Clear the thinking indicator line
+        io:print("\r             \r");
+
+        if response is ai:Error {
+            io:println(string `[ERROR] ${response.message()}`);
+            continue;
+        }
+
+        // Print agent response with formatting
+        io:println(string `Agent: ${response}`);
+        messageCount += 1;
+    }
+}
+
+function printWelcomeBanner() {
+    io:println("╔════════════════════════════════════════╗");
+    io:println("║     Interactive Console Chat           ║");
+    io:println("╚════════════════════════════════════════╝");
+    io:println("Type 'help' for commands, 'exit' to quit\n");
+}
+
+function printHelpMessage() {
+    io:println("\nAvailable Commands:");
+    io:println("  help, ?       - Show this help message");
+    io:println("  clear, cls    - Clear the screen");
+    io:println("  exit, quit    - Exit the chat");
+    io:println("\nJust type your message to chat with the agent.");
+}
+
+function printGoodbyeMessage(int messageCount) {
+    io:println("\n👋 Goodbye!");
+    if messageCount > 0 {
+        io:println(string `You exchanged ${messageCount} message${messageCount == 1 ? "" : "s"} in this session.`);
+    }
+}
+
+function clearScreen() {
+    // Print multiple newlines to simulate clearing
+    foreach int i in 0...50 {
+        io:println("");
+    }
 }
 
 service class HttpService {
@@ -135,10 +250,9 @@ service class HttpService {
     private final readonly & map<json> outputSchema;
     private final ai:Agent agent;
 
-    function init(AFMRecord afmRecord) returns error? {
-        AgentWithSchema {inputSchema, outputSchema, agent} = check createAgentWithSchema(afmRecord);
-        self.inputSchema = inputSchema;
-        self.outputSchema = outputSchema;
+    function init(ai:Agent agent, WebChatInterface webChatInterface) returns error? {
+        self.inputSchema = webChatInterface.signature.input.cloneReadOnly();
+        self.outputSchema = webChatInterface.signature.output.cloneReadOnly();
         self.agent = agent;
     }
 
@@ -321,20 +435,20 @@ function createAgent(AFMRecord afmRecord) returns ai:Agent|error {
     AFMRecord {metadata, role, instructions} = afmRecord;
 
     ai:McpToolKit[] mcpToolkits = [];
-    MCPConnections? mcpConnections = metadata?.tools?.mcp;
-    if mcpConnections is MCPConnections {
-        foreach MCPServer mcpConn in mcpConnections.servers {
+    MCPServer[]? mcpServers = metadata?.tools?.mcp;
+    if mcpServers is MCPServer[] {
+        foreach MCPServer mcpConn in mcpServers {
             Transport transport = mcpConn.transport;
-            if transport !is HttpTransport || (transport.'type != STREAMABLE_HTTP && transport.'type != HTTP_SSE) {
-                log:printWarn("Only streamable_http and http_sse transports are supported for MCP connections");
+            if transport.'type != "http" {
+                log:printWarn(string `Unsupported transport type: ${transport.'type}, only 'http' is supported`);
                 continue;
             }
-            
+
             string[]? filteredTools = getFilteredTools(mcpConn.tool_filter);
             mcpToolkits.push(check new ai:McpToolKit(
                 transport.url,
                 permittedTools = filteredTools,
-                auth = check mapToHttpClientAuth(mcpConn.authentication)
+                auth = check mapToHttpClientAuth(transport.authentication)
             ));
         }
     }
@@ -365,19 +479,6 @@ function createAgent(AFMRecord afmRecord) returns ai:Agent|error {
         return error("Failed to create agent", agent);
     }
     return agent;
-}
-
-function createAgentWithSchema(AFMRecord afmRecord) returns AgentWithSchema|error {
-    AgentMetadata metadata = afmRecord.metadata;
-
-    ai:Agent agent = check createAgent(afmRecord);
-
-    Signature signature = check metadata?.interface?.signature.ensureType();
-    
-    map<json> & readonly inputSchema = signature.input.cloneReadOnly();
-    map<json> & readonly outputSchema = signature.output.cloneReadOnly();
-
-    return {inputSchema, outputSchema, agent};
 }
 
 function runAgent(ai:Agent agent, json payload, map<json>? inputSchema = (), map<json>? outputSchema = ()) 
