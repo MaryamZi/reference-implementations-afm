@@ -20,6 +20,8 @@ import ballerina/ai;
 import ballerina/log;
 import ballerina/os;
 import ballerina/http;
+import ballerinax/ai.anthropic;
+import ballerinax/ai.openai;
 
 function createAgent(AFMRecord afmRecord) returns ai:Agent|error {
     AFMRecord {metadata, role, instructions} = afmRecord;
@@ -43,10 +45,7 @@ function createAgent(AFMRecord afmRecord) returns ai:Agent|error {
         }
     }
 
-    string? accessToken = os:getEnv("WSO2_MODEL_PROVIDER_TOKEN");
-    if accessToken is () {
-        return error("Environment variable WSO2_MODEL_PROVIDER_TOKEN must be set for Wso2ModelProvider");
-    }
+    ai:ModelProvider model = check getModel(metadata?.model);
     
     ai:AgentConfiguration agentConfig = {
         systemPrompt: {
@@ -54,9 +53,7 @@ function createAgent(AFMRecord afmRecord) returns ai:Agent|error {
             instructions
         },
         tools: mcpToolkits,
-        model: check new ai:Wso2ModelProvider(
-            "https://dev-tools.wso2.com/ballerina-copilot/v2.0",
-            accessToken)
+        model
     };
     
     int? maxIterations = metadata?.max_iterations;
@@ -69,6 +66,57 @@ function createAgent(AFMRecord afmRecord) returns ai:Agent|error {
         return error("Failed to create agent", agent);
     }
     return agent;
+}
+
+function getModel(Model? model) returns ai:ModelProvider|error {
+    if model is () {        
+        string? accessToken = os:getEnv("WSO2_MODEL_PROVIDER_TOKEN");
+        if accessToken is () {
+            return error("Environment variable WSO2_MODEL_PROVIDER_TOKEN must be set for Wso2ModelProvider");
+        }
+
+        return new ai:Wso2ModelProvider(
+            "https://dev-tools.wso2.com/ballerina-copilot/v2.0",
+            accessToken);
+    }
+
+    string? provider = model.provider;
+
+    if provider is () {
+        return error("This implementation requires the 'provider' of the model to be specified");
+    }
+
+    provider = provider.toLowerAscii();
+
+    if provider == "wso2" {
+        return new ai:Wso2ModelProvider(
+            model.url ?: "https://dev-tools.wso2.com/ballerina-copilot/v2.0",
+            check getToken(model.authentication)
+        );
+    }
+
+    string? name = model.name;
+    if name is () {
+        return error("This implementation requires the 'name' of the model to be specified");
+    }
+
+    match provider {
+        "openai" => {
+            return new openai:ModelProvider(
+                check getApiKey(model.authentication),
+                check name.ensureType(),
+                model.url ?: "https://api.openai.com/v1"
+            );
+        }
+        "anthropic" => {
+            return new anthropic:ModelProvider(
+                check getApiKey(model.authentication),
+                check name.ensureType(),
+                model.url ?: "https://api.anthropic.com/v1"
+            );
+        }
+    }
+    return error(string `Model provider: ${<string>provider} not yet supported`);
 }
 
 function runAgent(ai:Agent agent, json payload, map<json>? inputSchema = (), map<json>? outputSchema = ()) 
@@ -217,6 +265,28 @@ isolated function validateJsonSchema(map<json>? jsonSchemaVal, json sampleJson) 
     if validationResult is error {
         return error("JSON validation failed: " + validationResult.message());
     }
+}
+
+function getApiKey(ClientAuthentication? auth) returns string|error =>
+    getAuthTokenOrApiKey(auth, "api-key", "api_key");
+
+function getToken(ClientAuthentication? auth) returns string|error =>
+    getAuthTokenOrApiKey(auth, "bearer", "token");
+
+function getAuthTokenOrApiKey(ClientAuthentication? auth, string expectedType, string expectedKey) returns string|error {
+    if auth is () {
+        return error("No authentication provided");
+    }
+
+    if auth.'type.toLowerAscii() != expectedType {
+        return error(string `Unsupported authentication type for ${expectedType}: ${auth.'type}`);
+    }
+
+    if !auth.hasKey(expectedKey) {
+        return error(string `${expectedKey} not found in 'authentication'`);
+    }
+    
+    return auth.get(expectedKey).ensureType();
 }
 
 function mapToHttpClientAuth(ClientAuthentication? auth) returns http:ClientAuthConfig|error? {

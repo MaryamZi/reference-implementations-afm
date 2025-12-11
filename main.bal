@@ -42,7 +42,6 @@ public function main(string filePath) returns error? {
     var [consoleChatInterface, webChatInterface, webhookInterface] = 
                         check validateAndExtractInterfaces(agentInterfaces);
 
-    // Create a single shared agent instance for all interfaces
     ai:Agent agent = check createAgent(afm);
 
     // Start all service-based interfaces first (non-blocking)

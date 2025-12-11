@@ -21,6 +21,7 @@ type Provider record {|
 
 type Model record {|
     string name?;
+    string provider?;
     string url?;
     ClientAuthentication authentication?;
 |};
