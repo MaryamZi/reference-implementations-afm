@@ -1,6 +1,7 @@
+import ballerina/http;
 import ballerina/io;
-import ballerina/test;
 import ballerina/os;
+import ballerina/test;
 
 final string[] & readonly TEST_ENV_VARS = [
     "TEST_VAR_1",
@@ -632,4 +633,498 @@ function testAccessJsonFieldInvalidArrayIndex() {
     test:assertEquals(result.message(), "Array index out of bounds: 5");
 }
 
+// ============================================
+// Template Compilation Edge Cases
+// ============================================
 
+@test:Config
+function testCompileTemplateMalformedMissingCloseBrace() returns error? {
+    // Template with missing closing brace
+    // Expected: 2 segments - "Value: " as literal, then "${http:payload.field" as literal
+    string template = "Value: ${http:payload.field";
+    CompiledTemplate compiled = check compileTemplate(template);
+
+    test:assertEquals(compiled.segments.length(), 2);
+
+    TemplateSegment seg0 = compiled.segments[0];
+    if seg0 !is LiteralSegment {
+        test:assertFail("Expected LiteralSegment at index 0");
+    }
+    test:assertEquals(seg0.text, "Value: ");
+
+    TemplateSegment seg1 = compiled.segments[1];
+    if seg1 !is LiteralSegment {
+        test:assertFail("Expected LiteralSegment at index 1");
+    }
+    test:assertEquals(seg1.text, "Value: ${http:payload.field");
+}
+
+@test:Config
+function testCompileTemplateEmptyString() returns error? {
+    string template = "";
+    CompiledTemplate compiled = check compileTemplate(template);
+
+    // Empty template should have no segments
+    test:assertEquals(compiled.segments.length(), 0);
+}
+
+@test:Config
+function testCompileTemplateOnlyVariable() returns error? {
+    string template = "${http:payload.data}";
+    CompiledTemplate compiled = check compileTemplate(template);
+
+    test:assertEquals(compiled.segments.length(), 1);
+    TemplateSegment seg = compiled.segments[0];
+    if seg !is PayloadVariable {
+        test:assertFail("Expected PayloadVariable");
+    }
+    test:assertEquals(seg.path, "data");
+}
+
+@test:Config
+function testCompileTemplateUnknownPrefix() returns error? {
+    // ${http:unknown.field} should be treated as literal (not payload or header)
+    string template = "Data: ${http:unknown.field}";
+    CompiledTemplate compiled = check compileTemplate(template);
+
+    test:assertEquals(compiled.segments.length(), 2);
+    TemplateSegment seg1 = compiled.segments[1];
+    if seg1 !is LiteralSegment {
+        test:assertFail("Expected LiteralSegment for unknown prefix");
+    }
+    test:assertEquals(seg1.text, "${http:unknown.field}");
+}
+
+@test:Config
+function testCompileTemplateInvalidFormat() returns error? {
+    // ${http:payload} without the required subprefix (should be http:payload.field or http:header.name)
+    string template = "Value: ${http:payload}";
+    CompiledTemplate compiled = check compileTemplate(template);
+
+    // This should be treated as having an empty path for payload
+    test:assertEquals(compiled.segments.length(), 2);
+    TemplateSegment seg1 = compiled.segments[1];
+    if seg1 !is LiteralSegment {
+        test:assertFail("Expected LiteralSegment for invalid format");
+    }
+}
+
+@test:Config
+function testCompileTemplateConsecutiveVariables() returns error? {
+    string template = "${http:payload.a}${http:payload.b}";
+    CompiledTemplate compiled = check compileTemplate(template);
+
+    test:assertEquals(compiled.segments.length(), 2);
+    TemplateSegment seg0 = compiled.segments[0];
+    if seg0 !is PayloadVariable {
+        test:assertFail("Expected PayloadVariable at index 0");
+    }
+    test:assertEquals(seg0.path, "a");
+
+    TemplateSegment seg1 = compiled.segments[1];
+    if seg1 !is PayloadVariable {
+        test:assertFail("Expected PayloadVariable at index 1");
+    }
+    test:assertEquals(seg1.path, "b");
+}
+
+@test:Config
+function testCompileTemplateWholePayload() returns error? {
+    // Empty path after http:payload. means entire payload
+    string template = "Payload: ${http:payload.}";
+    CompiledTemplate compiled = check compileTemplate(template);
+
+    test:assertEquals(compiled.segments.length(), 2);
+    TemplateSegment seg1 = compiled.segments[1];
+    if seg1 !is PayloadVariable {
+        test:assertFail("Expected PayloadVariable");
+    }
+    test:assertEquals(seg1.path, "");
+}
+
+// ============================================
+// Template Evaluation Edge Cases
+// ============================================
+
+@test:Config
+function testEvaluateTemplateHeaderMissing() returns error? {
+    CompiledTemplate compiled = {
+        segments: [
+            {kind: "header", name: "NonExistent"}
+        ]
+    };
+    map<string|string[]> headers = {
+        "Authorization": "Bearer token"
+    };
+
+    // Should return empty string for missing header
+    string result = check evaluateTemplate(compiled, {}, headers);
+    test:assertEquals(result, "");
+}
+
+@test:Config
+function testEvaluateTemplateHeaderWithNoHeaders() returns error? {
+    CompiledTemplate compiled = {
+        segments: [
+            {kind: "header", name: "Authorization"}
+        ]
+    };
+
+    // No headers provided - should return empty string
+    string result = check evaluateTemplate(compiled, {}, ());
+    test:assertEquals(result, "");
+}
+
+@test:Config
+function testEvaluateTemplateHeaderArrayValue() returns error? {
+    CompiledTemplate compiled = {
+        segments: [
+            {kind: "header", name: "Accept"}
+        ]
+    };
+    map<string|string[]> headers = {
+        "Accept": ["application/json", "text/html"]
+    };
+
+    // Should join array values with ", "
+    string result = check evaluateTemplate(compiled, {}, headers);
+    test:assertEquals(result, "application/json, text/html");
+}
+
+@test:Config
+function testEvaluateTemplatePayloadFieldMissing() returns error? {
+    CompiledTemplate compiled = {
+        segments: [
+            {kind: "payload", path: "nonexistent.field"}
+        ]
+    };
+    json payload = {name: "test"};
+
+    // Should return empty string for missing field
+    string result = check evaluateTemplate(compiled, payload, ());
+    test:assertEquals(result, "");
+}
+
+@test:Config
+function testEvaluateTemplatePayloadFieldNonString() returns error? {
+    CompiledTemplate compiled = {
+        segments: [
+            {kind: "payload", path: "count"}
+        ]
+    };
+    json payload = {count: 42};
+
+    // Should convert non-string values to JSON string
+    string result = check evaluateTemplate(compiled, payload, ());
+    test:assertEquals(result, "42");
+}
+
+@test:Config
+function testEvaluateTemplatePayloadFieldObject() returns error? {
+    CompiledTemplate compiled = {
+        segments: [
+            {kind: "payload", path: "user"}
+        ]
+    };
+    json payload = {user: {name: "Alice", age: 30}};
+
+    // Should convert object to JSON string (Ballerina adds spaces after colons)
+    string result = check evaluateTemplate(compiled, payload, ());
+    test:assertEquals(result, "{\"name\":\"Alice\", \"age\":30}");
+}
+
+@test:Config
+function testEvaluateTemplateComplexMixed() returns error? {
+    CompiledTemplate compiled = {
+        segments: [
+            {kind: "literal", text: "Request from "},
+            {kind: "header", name: "User-Agent"},
+            {kind: "literal", text: " with data: "},
+            {kind: "payload", path: "message"},
+            {kind: "literal", text: " (count: "},
+            {kind: "payload", path: "count"},
+            {kind: "literal", text: ")"}
+        ]
+    };
+    json payload = {message: "Hello", count: 5};
+    map<string|string[]> headers = {
+        "User-Agent": "TestClient/1.0"
+    };
+
+    string result = check evaluateTemplate(compiled, payload, headers);
+    test:assertEquals(result, "Request from TestClient/1.0 with data: Hello (count: 5)");
+}
+
+// ============================================
+// JSON Field Access Edge Cases
+// ============================================
+
+@test:Config
+function testAccessJsonFieldEmptyPath() returns error? {
+    json payload = {data: "value"};
+    json|error result = accessJsonField(payload, "");
+
+    if result is error {
+        test:assertFail("Expected success for empty path");
+    }
+    // Empty path should return the payload itself (based on handleDotNotation logic)
+    test:assertEquals(result, payload);
+}
+
+@test:Config
+function testAccessJsonFieldBracketMissingCloseBrace() {
+    json payload = {data: "value"};
+    json|error result = accessJsonField(payload, "[field");
+
+    if result is json {
+        test:assertFail("Expected error for missing close bracket");
+    }
+    test:assertEquals(result.message(), "Invalid bracket notation in path: [field");
+}
+
+@test:Config
+function testAccessJsonFieldBracketNonObject() {
+    json payload = "string value";
+    json|error result = accessJsonField(payload, "['field']");
+
+    if result is json {
+        test:assertFail("Expected error for accessing field on non-object");
+    }
+    test:assertEquals(result.message(), "Cannot access field 'field' on non-object");
+}
+
+@test:Config
+function testAccessJsonFieldBracketFieldNotFound() {
+    json payload = {other: "value"};
+    json|error result = accessJsonField(payload, "['missing']");
+
+    if result is json {
+        test:assertFail("Expected error for field not found");
+    }
+    test:assertEquals(result.message(), "Field 'missing' not found");
+}
+
+@test:Config
+function testAccessJsonFieldArrayInvalidIndex() {
+    json payload = {items: ["a", "b"]};
+    json|error result = accessJsonField(payload, "items[abc]");
+
+    if result is json {
+        test:assertFail("Expected error for invalid array index");
+    }
+    test:assertEquals(result.message(), "Invalid array index: abc");
+}
+
+@test:Config
+function testAccessJsonFieldArrayOnNonArray() {
+    json payload = {data: "not an array"};
+    json|error result = accessJsonField(payload, "data[0]");
+
+    if result is json {
+        test:assertFail("Expected error for accessing index on non-array");
+    }
+    test:assertEquals(result.message(), "Cannot access index 0 on non-array");
+}
+
+@test:Config
+function testAccessJsonFieldDotOnNonObject() {
+    json payload = ["array", "items"];
+    json|error result = accessJsonField(payload, "field");
+
+    if result is json {
+        test:assertFail("Expected error for accessing field on non-object");
+    }
+    test:assertEquals(result.message(), "Cannot access field 'field' on non-object");
+}
+
+@test:Config
+function testAccessJsonFieldMixedNotationInvalidBracket() {
+    json payload = {data: {items: [1, 2, 3]}};
+    json|error result = accessJsonField(payload, "data.items[");
+
+    if result is json {
+        test:assertFail("Expected error for invalid bracket notation");
+    }
+}
+
+@test:Config
+function testAccessJsonFieldMixedNotationFieldNotFound() {
+    json payload = {data: {value: 123}};
+    json|error result = accessJsonField(payload, "data.missing[0]");
+
+    if result is json {
+        test:assertFail("Expected error for field not found in mixed notation");
+    }
+    test:assertEquals(result.message(), "Field 'missing' not found");
+}
+
+@test:Config
+function testAccessJsonFieldMixedNotationNonObject() {
+    json payload = {data: "string"};
+    json|error result = accessJsonField(payload, "data.field[0]");
+
+    if result is json {
+        test:assertFail("Expected error for accessing field on non-object in mixed notation");
+    }
+    // Tries to access 'field' on the string value "string"
+    test:assertEquals(result.message(), "Cannot access field 'field' on non-object");
+}
+
+@test:Config
+function testAccessJsonFieldBracketContinuationWithDot() returns error? {
+    json payload = {
+        "data": {
+            "items": [
+                {"name": "first"},
+                {"name": "second"}
+            ]
+        }
+    };
+
+    json result = check accessJsonField(payload, "['data'].items[1].name");
+    test:assertEquals(result, "second");
+}
+
+@test:Config
+function testAccessJsonFieldNegativeArrayIndex() {
+    json payload = {items: [1, 2, 3]};
+    json|error result = accessJsonField(payload, "items[-1]");
+
+    if result is json {
+        test:assertFail("Expected error for negative array index");
+    }
+    test:assertEquals(result.message(), "Array index out of bounds: -1");
+}
+
+@test:Config
+function testAccessJsonFieldDoubleQuotedKey() returns error? {
+    json payload = {"field.name": "value"};
+    json result = check accessJsonField(payload, "[\"field.name\"]");
+    test:assertEquals(result, "value");
+}
+
+// ============================================
+// Helper Function Tests
+// ============================================
+
+@test:Config
+function testHandlePayloadVariableString() returns error? {
+    string[] parts = [];
+    PayloadVariable segment = {kind: "payload", path: "name"};
+    json payload = {name: "Alice"};
+
+    handlePayloadVariable(payload, parts, segment);
+
+    test:assertEquals(parts.length(), 1);
+    test:assertEquals(parts[0], "Alice");
+}
+
+@test:Config
+function testHandlePayloadVariableEntirePayload() returns error? {
+    string[] parts = [];
+    PayloadVariable segment = {kind: "payload", path: ""};
+    json payload = {name: "Bob", age: 25};
+
+    handlePayloadVariable(payload, parts, segment);
+
+    test:assertEquals(parts.length(), 1);
+    // Ballerina adds spaces after colons in JSON output
+    test:assertEquals(parts[0], "{\"name\":\"Bob\", \"age\":25}");
+}
+
+@test:Config
+function testHandlePayloadVariableMissingField() returns error? {
+    string[] parts = [];
+    PayloadVariable segment = {kind: "payload", path: "nonexistent"};
+    json payload = {name: "Charlie"};
+
+    handlePayloadVariable(payload, parts, segment);
+
+    // Should add empty string for missing field
+    test:assertEquals(parts.length(), 1);
+    test:assertEquals(parts[0], "");
+}
+
+@test:Config
+function testHandlePayloadVariableNonStringValue() returns error? {
+    string[] parts = [];
+    PayloadVariable segment = {kind: "payload", path: "age"};
+    json payload = {age: 30};
+
+    handlePayloadVariable(payload, parts, segment);
+
+    test:assertEquals(parts.length(), 1);
+    test:assertEquals(parts[0], "30");
+}
+
+// ============================================
+// Authentication Mapping Tests
+// ============================================
+
+@test:Config
+function testMapToHttpClientAuthNoAuth() returns error? {
+    http:ClientAuthConfig? result = check mapToHttpClientAuth(());
+    test:assertTrue(result is ());
+}
+
+@test:Config
+function testMapToHttpClientAuthBasic() returns error? {
+    ClientAuthentication auth = {
+        'type: "Basic",
+        "username": "user",
+        "password": "pass"
+    };
+
+    http:ClientAuthConfig? result = check mapToHttpClientAuth(auth);
+    test:assertTrue(result is http:CredentialsConfig);
+}
+
+@test:Config
+function testMapToHttpClientAuthBearer() returns error? {
+    ClientAuthentication auth = {
+        'type: "Bearer",
+        "token": "test-token"
+    };
+
+    http:ClientAuthConfig? result = check mapToHttpClientAuth(auth);
+    test:assertTrue(result is http:BearerTokenConfig);
+}
+
+@test:Config
+function testMapToHttpClientAuthOAuth2NotSupported() {
+    ClientAuthentication auth = {
+        'type: "oauth2"
+    };
+
+    http:ClientAuthConfig|error? result = mapToHttpClientAuth(auth);
+    if result is http:ClientAuthConfig? {
+        test:assertFail("Expected error for OAuth2 authentication");
+    }
+    test:assertEquals(result.message(), "OAuth2 authentication not yet supported");
+}
+
+@test:Config
+function testMapToHttpClientAuthJWTNotSupported() {
+    ClientAuthentication auth = {
+        'type: "jwt"
+    };
+
+    http:ClientAuthConfig|error? result = mapToHttpClientAuth(auth);
+    if result is http:ClientAuthConfig? {
+        test:assertFail("Expected error for JWT authentication");
+    }
+    test:assertEquals(result.message(), "JWT authentication not yet supported");
+}
+
+@test:Config
+function testMapToHttpClientAuthUnsupportedType() {
+    ClientAuthentication auth = {
+        'type: "custom-auth"
+    };
+
+    http:ClientAuthConfig|error? result = mapToHttpClientAuth(auth);
+    if result is http:ClientAuthConfig? {
+        test:assertFail("Expected error for unsupported authentication type");
+    }
+    test:assertEquals(result.message(), "Unsupported authentication type: custom-auth");
+}
