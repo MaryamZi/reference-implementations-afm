@@ -11,7 +11,7 @@ interfaces:
       protocol: "websub"
       hub: "http://localhost:9193/websub/hub"
       topic: "http://localhost:9193/events/orders"
-      callback: "http://localhost:8085/webhook"
+      callback: "${env:WH_HOST}/webhook"
 max_iterations: 5
 model:
   provider: "wso2"

@@ -17,6 +17,7 @@
 import ballerina/http;
 import ballerina/lang.runtime;
 import ballerina/log;
+import ballerina/os;
 import ballerina/test;
 import ballerina/websubhub;
 
@@ -188,6 +189,8 @@ function publishToSubscriber(readonly & websubhub:VerifiedSubscription subscribe
 
 @test:Config
 function testWebhookEndToEnd() returns error? {
+    check os:setEnv("WH_HOST", "http://localhost:8085");
+
     // Reset counters and state
     mockWebhookResponseCounter = 0;
     capturedPrompts = [];

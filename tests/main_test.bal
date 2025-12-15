@@ -8,7 +8,8 @@ final string[] & readonly TEST_ENV_VARS = [
     "TEST_VAR_2",
     "VAR_A",
     "VAR_B",
-    "COMMENT_VAR"
+    "COMMENT_VAR",
+    "WH_HOST"
 ];
 
 @test:AfterSuite
