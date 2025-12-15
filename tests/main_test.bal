@@ -682,37 +682,23 @@ function testCompileTemplateOnlyVariable() returns error? {
 }
 
 @test:Config
-function testCompileTemplateUnknownPrefix() returns error? {
-    // ${http:unknown.field} should be treated as literal (not payload or header)
+function testCompileTemplateUnknownPrefix() {
     string template = "Data: ${http:unknown.field}";
-    CompiledTemplate compiled = check compileTemplate(template);
-
-    test:assertEquals(compiled.segments.length(), 2);
-    TemplateSegment seg1 = compiled.segments[1];
-    if seg1 !is LiteralSegment {
-        test:assertFail("Expected LiteralSegment for unknown prefix");
+    CompiledTemplate|error result = compileTemplate(template);
+    if result is CompiledTemplate {
+        test:assertFail("Expected error for unknown prefix");
     }
-    test:assertEquals(seg1.text, "${http:unknown.field}");
+    test:assertEquals(result.message(), "Unknown http variable prefix: unknown");
 }
 
 @test:Config
-function testCompileTemplateInvalidFormat() returns error? {
-    // ${http:header} without the required subprefix (should be http:header.name)
+function testCompileTemplateInvalidFormat() {
     string template = "Value: ${http:header}";
-    CompiledTemplate compiled = check compileTemplate(template);
-
-    test:assertEquals(compiled.segments.length(), 2);
-    TemplateSegment seg0 = compiled.segments[0];
-    if seg0 !is LiteralSegment {
-        test:assertFail("Expected LiteralSegment at index 0");
+    CompiledTemplate|error result = compileTemplate(template);
+    if result is CompiledTemplate {
+        test:assertFail("Expected error for invalid format");
     }
-    test:assertEquals(seg0.text, "Value: ");
-
-    TemplateSegment seg1 = compiled.segments[1];
-    if seg1 !is LiteralSegment {
-        test:assertFail("Expected LiteralSegment for invalid format");
-    }
-    test:assertEquals(seg1.text, "${http:header}");
+    test:assertEquals(result.message(), "Invalid http variable format: http:header");
 }
 
 @test:Config
@@ -748,16 +734,13 @@ function testCompileTemplateWholePayload() returns error? {
 }
 
 @test:Config
-function testIncompletePayloadAccess() returns error? {
+function testIncompletePayloadAccess() {
     string template = "Payload: ${http:payload.}";
-    CompiledTemplate compiled = check compileTemplate(template);
-
-    test:assertEquals(compiled.segments.length(), 2);
-    TemplateSegment seg1 = compiled.segments[1];
-    if seg1 !is LiteralSegment {
-        test:assertFail("Expected LiteralSegment for incomplete payload access");
+    CompiledTemplate|error result = compileTemplate(template);
+    if result is CompiledTemplate {
+        test:assertFail("Expected error for incomplete payload access");
     }
-    test:assertEquals(seg1.text, "${http:payload.}");
+    test:assertEquals(result.message(), "Invalid http variable format: http:payload.");
 }
 
 // ============================================

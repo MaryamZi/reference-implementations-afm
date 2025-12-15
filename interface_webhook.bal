@@ -117,27 +117,21 @@ function compileTemplate(string template) returns CompiledTemplate|error {
 
             if subPrefix == "payload" {
                 if subPath == "" {
-                    // Empty subpath for payload is invalid, treat as literal
-                    segments.push({kind: "literal", text: template.substring(dollarPos, closeBracePos + 1)});
-                    startPos = closeBracePos + 1;
-                    continue;
+                    // Empty subpath for payload is invalid
+                    return error(string `Invalid http variable format: ${varExpr}`);
                 }
                 segments.push({kind: "payload", path: subPath});
             } else if subPrefix == "header" {
                 segments.push({kind: "header", name: subPath});
             } else {
-                // Unknown subprefix, treat as literal
-                segments.push({kind: "literal", text: template.substring(dollarPos, closeBracePos + 1)});
-                startPos = closeBracePos + 1;
-                continue;
+                // Unknown subprefix
+                return error(string `Unknown http variable prefix: ${subPrefix}`);
             }
         } else if path == "payload" {
             segments.push({kind: "payload", path: ""});
         } else {
-            // Invalid format, treat as literal
-            segments.push({kind: "literal", text: template.substring(dollarPos, closeBracePos + 1)});
-            startPos = closeBracePos + 1;
-            continue;
+            // Invalid format
+            return error(string `Invalid http variable format: ${varExpr}`);
         }
     
         startPos = closeBracePos + 1;
