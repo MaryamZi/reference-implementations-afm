@@ -330,9 +330,17 @@ function exposureContainsHttpVariable(Exposure exposure) returns boolean =>
             containsHttpVariable(httpExposure.path);
 
 function subscriptionContainsHttpVariable(Subscription subscription) returns boolean {
-    if containsHttpVariable(subscription.protocol) || 
-            containsHttpVariable(subscription.hub) || 
-            containsHttpVariable(subscription.topic) {
+    if containsHttpVariable(subscription.protocol) {
+        return true;
+    }
+
+    string? hub = subscription.hub;
+    if hub is string && containsHttpVariable(hub) {
+        return true;
+    }
+
+    string? topic = subscription.topic;
+    if topic is string && containsHttpVariable(topic) {
         return true;
     }
 

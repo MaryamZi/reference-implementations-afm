@@ -103,8 +103,8 @@ enum InterfaceType {
 
 type Subscription record {|
     string protocol;
-    string hub;
-    string topic;
+    string hub?;
+    string topic?;
     string callback?;
     string secret?;
     ClientAuthentication authentication?;

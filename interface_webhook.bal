@@ -37,9 +37,15 @@ function attachWebhookService(websub:Listener websubListener, ai:Agent agent, We
     // Can't specify inline due to a bug.
     http:ClientAuthConfig? auth = check mapToHttpClientAuth(subscription.authentication);
 
+    // Only set target when hub and topic are provided (automatic subscription)
+    // When not provided, this is a manually registered webhook
+    string? hub = subscription.hub;
+    string? topic = subscription.topic;
+    [string, string]? target = (hub is string && topic is string) ? [hub, topic] : ();
+
     websub:SubscriberService webhookService =
         @websub:SubscriberServiceConfig {
-            target: [subscription.hub, subscription.topic],
+            target: target,
             secret: subscription.secret,
             httpConfig: {
                 auth
