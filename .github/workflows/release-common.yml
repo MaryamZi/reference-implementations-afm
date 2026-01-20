@@ -123,10 +123,14 @@ jobs:
       - name: Determine Docker tags
         id: docker-tags
         env:
-          IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/afm-${{ inputs.implementation }}
+          OWNER: ${{ github.repository_owner }}
+          IMPLEMENTATION: ${{ inputs.implementation }}
           VERSION: ${{ inputs.version }}
           UPDATE_LATEST: ${{ inputs.update_latest }}
         run: |
+          # GHCR requires lowercase repository names
+          OWNER_LOWER=$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')
+          IMAGE_NAME="ghcr.io/$OWNER_LOWER/afm-$IMPLEMENTATION"
           TAGS="$IMAGE_NAME:v$VERSION"
           if [ "$UPDATE_LATEST" = "true" ]; then
             TAGS="$TAGS,$IMAGE_NAME:latest"
