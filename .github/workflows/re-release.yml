@@ -73,8 +73,8 @@ jobs:
             exit 1
           fi
 
-          # Extract all @usernames from CODEOWNERS
-          OWNERS=$(grep -oE '@[a-zA-Z0-9_-]+' "$CODEOWNERS_FILE" | tr -d '@' | sort -u)
+          # Extract all @usernames from CODEOWNERS (dots allowed in GitHub usernames)
+          OWNERS=$(grep -oE '@[a-zA-Z0-9._-]+' "$CODEOWNERS_FILE" | tr -d '@' | sort -u)
 
           # Check if actor is in the list
           if ! echo "$OWNERS" | grep -qx "$ACTOR"; then

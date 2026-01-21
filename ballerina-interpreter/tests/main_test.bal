@@ -657,7 +657,7 @@ function testCompileTemplateMalformedMissingCloseBrace() returns error? {
     if seg1 !is LiteralSegment {
         test:assertFail("Expected LiteralSegment at index 1");
     }
-    test:assertEquals(seg1.text, "Value: ${http:payload.field");
+    test:assertEquals(seg1.text, "${http:payload.field");
 }
 
 @test:Config

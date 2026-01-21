@@ -164,8 +164,8 @@ function testConsoleChatEndToEnd() returns error? {
 
     // Assert we have expected number of output calls
     // Output structure: banner lines (4) + prompt + thinking + clear + response (repeated 2x) + prompt + goodbye + count
-    test:assertTrue(outputs.length() >= 10,
-        string `Should have at least 10 output lines, got ${outputs.length()}`);
+    test:assertTrue(outputs.length() >= 15,
+        string `Should have at least 15 output lines, got ${outputs.length()}`);
 
     // Verify output by exact array indices
     // Welcome banner lines

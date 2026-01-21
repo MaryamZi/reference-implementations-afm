@@ -139,7 +139,7 @@ jobs:
             index:org.opencontainers.image.licenses=Apache-2.0
 
       - name: Scan Docker image for vulnerabilities
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@0.28.0
         with:
           image-ref: ${{ steps.docker-tags.outputs.IMAGE_NAME }}:v${{ inputs.version }}
           format: 'sarif'
@@ -168,12 +168,8 @@ jobs:
           VERSION: ${{ inputs.version }}
           IS_RERELEASE: ${{ inputs.is_rerelease }}
         run: |
-          # Find previous tag for this implementation
-          if [ "$IS_RERELEASE" = "true" ]; then
-            PREV_TAG=$(git tag -l "$IMPLEMENTATION-v*" --sort=-v:refname | grep -v "^$IMPLEMENTATION-v$VERSION$" | head -1)
-          else
-            PREV_TAG=$(git tag -l "$IMPLEMENTATION-v*" --sort=-v:refname | head -1)
-          fi
+          # Find previous tag for this implementation (exclude current version since tag was just created)
+          PREV_TAG=$(git tag -l "$IMPLEMENTATION-v*" --sort=-v:refname | grep -v "^$IMPLEMENTATION-v$VERSION$" | head -1)
 
           # Generate notes from commits that touched this implementation
           if [ -n "$PREV_TAG" ]; then

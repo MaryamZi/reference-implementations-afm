@@ -16,7 +16,9 @@ FROM eclipse-temurin:21-jre
 
 WORKDIR /app
 
-COPY --from=builder /app/target/bin/afm_ballerina.jar ./
-COPY resources ./resources
+COPY --from=builder --chown=10014:0 /app/target/bin/afm_ballerina.jar ./
+COPY --chown=10014:0 resources ./resources
+
+USER 10014
 
 ENTRYPOINT ["java", "-jar", "afm_ballerina.jar"]

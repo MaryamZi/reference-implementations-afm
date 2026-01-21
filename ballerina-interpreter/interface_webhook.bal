@@ -98,8 +98,8 @@ function compileTemplate(string template) returns CompiledTemplate|error {
 
         int? closeBracePos = template.indexOf("}", dollarPos);
         if closeBracePos is () {
-            // Malformed template, treat remaining as literal
-            segments.push({kind: "literal", text: template.substring(startPos)});
+            // Malformed template, treat remaining as literal starting from the unclosed ${
+            segments.push({kind: "literal", text: template.substring(dollarPos)});
             break;
         }
 
