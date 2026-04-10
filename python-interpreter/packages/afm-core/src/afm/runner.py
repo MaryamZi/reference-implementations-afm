@@ -18,7 +18,8 @@ from __future__ import annotations
 
 import importlib.metadata
 import logging
-from typing import Any, Protocol, runtime_checkable
+from dataclasses import dataclass, field
+from typing import Any, AsyncIterator, Protocol, runtime_checkable
 
 from .models import AFMRecord, Signature
 
@@ -26,6 +27,64 @@ logger = logging.getLogger(__name__)
 
 ENTRY_POINT_GROUP = "afm.runner"
 DEFAULT_RUNNER = "langchain"
+
+
+# ---------------------------------------------------------------------------
+# Agent event types — used by astream() to communicate incremental progress
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class AgentEvent:
+    """Base class for events yielded during an agent turn."""
+
+
+@dataclass
+class TokenEvent(AgentEvent):
+    """A chunk of LLM-generated text."""
+
+    text: str
+
+
+@dataclass
+class ToolCallEvent(AgentEvent):
+    """The agent is about to call a tool."""
+
+    call_id: str
+    tool_name: str
+    server_name: str
+    arguments: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ToolResultEvent(AgentEvent):
+    """A tool call completed."""
+
+    call_id: str
+    result: str
+    is_error: bool = False
+
+
+@dataclass
+class PermissionRequestEvent(AgentEvent):
+    """The agent needs user approval before executing a tool call.
+
+    The UI must call runner.approve(call_id) or runner.deny(call_id)
+    to unblock execution.
+    """
+
+    call_id: str
+    tool_name: str
+    server_name: str
+    arguments: dict[str, Any] = field(default_factory=dict)
+    reason: str = ""
+
+
+@dataclass
+class TurnCompleteEvent(AgentEvent):
+    """The agent turn is finished."""
+
+    final_text: str | None = None
 
 
 @runtime_checkable
@@ -53,6 +112,16 @@ class AgentRunner(Protocol):
         *,
         session_id: str = "default",
     ) -> str | dict[str, Any]: ...
+
+    def astream(
+        self,
+        input_data: str | dict[str, Any],
+        *,
+        session_id: str = "default",
+    ) -> AsyncIterator[AgentEvent]: ...
+
+    async def approve(self, call_id: str) -> None: ...
+    async def deny(self, call_id: str, reason: str = "") -> None: ...
 
     def clear_history(self, session_id: str = "default") -> None: ...
 

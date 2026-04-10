@@ -16,14 +16,27 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from io import StringIO
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from textual.containers import VerticalScroll
-from textual.widgets import Input, Static
+from rich.console import Console
 
-from afm.runner import AgentRunner
-from afm.interfaces.console_chat import ChatApp
+from afm.interfaces.console_chat import ConsoleChatREPL
+from afm.runner import (
+    AgentRunner,
+    PermissionRequestEvent,
+    TokenEvent,
+    ToolCallEvent,
+    ToolResultEvent,
+    TurnCompleteEvent,
+)
+
+
+async def _make_stream(*events):
+    """Helper to create an async iterator of AgentEvents."""
+    for event in events:
+        yield event
 
 
 @pytest.fixture
@@ -31,132 +44,233 @@ def mock_agent() -> MagicMock:
     agent = MagicMock(spec=AgentRunner)
     agent.name = "Test Agent"
     agent.description = "A test agent for unit testing"
-    # Mock arun to yield control back to the event loop
-    agent.arun = AsyncMock(return_value="Hello! I'm the test agent.")
+    agent.astream = MagicMock(
+        return_value=_make_stream(
+            TokenEvent(text="Hello! I'm the test agent."),
+            TurnCompleteEvent(final_text="Hello! I'm the test agent."),
+        )
+    )
     agent.clear_history = MagicMock()
+    agent.approve = AsyncMock()
+    agent.deny = AsyncMock()
     return agent
 
 
-@pytest.mark.asyncio
-async def test_app_starts_with_welcome(mock_agent: MagicMock) -> None:
-    app = ChatApp(mock_agent)
-    async with app.run_test():
-        # Check welcome message
-        chat_log = app.query_one("#chat-log")
-        assert chat_log is not None
-
-        welcome_widget = chat_log.query_one(".system-message", Static)
-        assert "Welcome to chat with Test Agent" in str(welcome_widget.render())
+@pytest.fixture
+def repl(mock_agent: MagicMock) -> ConsoleChatREPL:
+    r = ConsoleChatREPL(mock_agent)
+    r.console = Console(file=StringIO(), no_color=True, highlight=False)
+    return r
 
 
-@pytest.mark.asyncio
-async def test_user_message_flow(mock_agent: MagicMock) -> None:
-    app = ChatApp(mock_agent)
-    async with app.run_test() as pilot:
-        # Type message
-        input_widget = app.query_one("#chat-input", Input)
-        input_widget.value = "Hello!"
-        await pilot.press("enter")
-
-        # Wait for worker to complete
-        await pilot.pause()
-
-        # Check user message
-        chat_log = app.query_one("#chat-log", VerticalScroll)
-        user_msgs = chat_log.query(".user-message")
-        assert len(user_msgs) == 1
-        assert "Hello!" in str(user_msgs[0].render())
-
-        # Check agent response
-        agent_msgs = chat_log.query(".agent-message")
-        assert len(agent_msgs) == 1
-        assert "Hello! I'm the test agent." in str(agent_msgs[0].render())
-
-        # Verify agent was called
-        mock_agent.arun.assert_called_once()
+def get_output(repl: ConsoleChatREPL) -> str:
+    file = repl.console.file
+    assert isinstance(file, StringIO)
+    return file.getvalue()
 
 
 @pytest.mark.asyncio
-async def test_help_command(mock_agent: MagicMock) -> None:
-    app = ChatApp(mock_agent)
-    async with app.run_test() as pilot:
-        input_widget = app.query_one("#chat-input", Input)
-        input_widget.value = "help"
-        await pilot.press("enter")
-
-        await pilot.pause()
-
-        # Check for help message
-        chat_log = app.query_one("#chat-log")
-        system_msgs = chat_log.query(".system-message")
-        # Should be welcome + help
-        assert len(system_msgs) >= 2
-        last_msg = system_msgs[-1]
-        assert "Available commands" in str(last_msg.render())
+async def test_banner_shows_agent_info(repl: ConsoleChatREPL) -> None:
+    repl._print_banner()
+    output = get_output(repl)
+    assert "Test Agent" in output
+    assert "A test agent for unit testing" in output
+    assert "/help" in output
+    assert "/quit" in output
 
 
 @pytest.mark.asyncio
-async def test_clear_command(mock_agent: MagicMock) -> None:
-    app = ChatApp(mock_agent)
-    async with app.run_test() as pilot:
-        input_widget = app.query_one("#chat-input", Input)
-        input_widget.value = "clear"
-        await pilot.press("enter")
-
-        await pilot.pause()
-
-        # Check confirmation
-        chat_log = app.query_one("#chat-log")
-        system_msgs = chat_log.query(".system-message")
-        last_msg = system_msgs[-1]
-        assert "history cleared" in str(last_msg.render())
-
-        # Verify agent called
-        mock_agent.clear_history.assert_called_once()
+async def test_help_command(repl: ConsoleChatREPL) -> None:
+    repl._handle_command("/help")
+    output = get_output(repl)
+    assert "/help" in output
+    assert "/clear" in output
+    assert "/quit" in output
 
 
 @pytest.mark.asyncio
-async def test_exit_command(mock_agent: MagicMock) -> None:
-    app = ChatApp(mock_agent)
-    async with app.run_test() as pilot:
-        input_widget = app.query_one("#chat-input", Input)
-        input_widget.value = "exit"
-        await pilot.press("enter")
-
-        # App should exit
-        await pilot.pause()
-        assert not app.is_running
+async def test_clear_command(repl: ConsoleChatREPL, mock_agent: MagicMock) -> None:
+    repl._handle_command("/clear")
+    mock_agent.clear_history.assert_called_once_with(repl.session_id)
+    output = get_output(repl)
+    assert "cleared" in output.lower()
 
 
 @pytest.mark.asyncio
-async def test_agent_error_display(mock_agent: MagicMock) -> None:
-    mock_agent.arun.side_effect = Exception("Test Error")
-
-    app = ChatApp(mock_agent)
-    async with app.run_test() as pilot:
-        input_widget = app.query_one("#chat-input", Input)
-        input_widget.value = "Hello"
-        await pilot.press("enter")
-
-        await pilot.pause()
-
-        # Check error message
-        errors = app.query(".error-message")
-        assert len(errors) == 1
-        assert "Test Error" in str(errors[0].render())
+async def test_quit_command(repl: ConsoleChatREPL) -> None:
+    assert repl._handle_command("/quit") is True
+    assert repl._handle_command("/exit") is True
 
 
 @pytest.mark.asyncio
-async def test_json_response(mock_agent: MagicMock) -> None:
-    mock_agent.arun.return_value = {"foo": "bar"}
+async def test_unknown_command(repl: ConsoleChatREPL) -> None:
+    assert repl._handle_command("/unknown") is False
+    output = get_output(repl)
+    assert "Unknown command" in output
 
-    app = ChatApp(mock_agent)
-    async with app.run_test() as pilot:
-        input_widget = app.query_one("#chat-input", Input)
-        input_widget.value = "Hello"
-        await pilot.press("enter")
 
-        await pilot.pause()
+@pytest.mark.asyncio
+async def test_user_message_flow(
+    repl: ConsoleChatREPL, mock_agent: MagicMock
+) -> None:
+    inputs = iter(["Hello!", "/quit"])
 
-        agent_msgs = app.query(".agent-message")
-        assert '"foo": "bar"' in str(agent_msgs[0].render())
+    with patch.object(repl.console, "input", side_effect=inputs):
+        await repl.run()
+
+    mock_agent.astream.assert_called_once()
+    call_args = mock_agent.astream.call_args
+    assert call_args[0][0] == "Hello!"
+    output = get_output(repl)
+    assert "Hello! I'm the test agent." in output
+
+
+@pytest.mark.asyncio
+async def test_agent_error_display(
+    repl: ConsoleChatREPL, mock_agent: MagicMock
+) -> None:
+    async def _error_stream(*args, **kwargs):
+        raise Exception("Test Error")
+        yield  # make it an async generator  # noqa: E501
+
+    mock_agent.astream = MagicMock(side_effect=_error_stream)
+    inputs = iter(["Hello", "/quit"])
+
+    with patch.object(repl.console, "input", side_effect=inputs):
+        await repl.run()
+
+    output = get_output(repl)
+    assert "Test Error" in output
+
+
+@pytest.mark.asyncio
+async def test_tool_call_display(
+    repl: ConsoleChatREPL, mock_agent: MagicMock
+) -> None:
+    mock_agent.astream = MagicMock(
+        return_value=_make_stream(
+            ToolCallEvent(
+                call_id="1", tool_name="read_file", server_name="filesystem"
+            ),
+            ToolResultEvent(call_id="1", result="file contents"),
+            TokenEvent(text="I read the file."),
+            TurnCompleteEvent(final_text="I read the file."),
+        )
+    )
+    inputs = iter(["read it", "/quit"])
+
+    with patch.object(repl.console, "input", side_effect=inputs):
+        await repl.run()
+
+    output = get_output(repl)
+    assert "filesystem.read_file" in output
+    assert "file contents" in output
+    assert "I read the file." in output
+
+
+@pytest.mark.asyncio
+async def test_tool_error_display(
+    repl: ConsoleChatREPL, mock_agent: MagicMock
+) -> None:
+    mock_agent.astream = MagicMock(
+        return_value=_make_stream(
+            ToolCallEvent(
+                call_id="1", tool_name="run_cmd", server_name="shell"
+            ),
+            ToolResultEvent(
+                call_id="1", result="Permission denied", is_error=True
+            ),
+            TurnCompleteEvent(final_text="The command failed."),
+        )
+    )
+    inputs = iter(["do it", "/quit"])
+
+    with patch.object(repl.console, "input", side_effect=inputs):
+        await repl.run()
+
+    output = get_output(repl)
+    assert "shell.run_cmd" in output
+    assert "Permission denied" in output
+
+
+@pytest.mark.asyncio
+async def test_empty_input_ignored(
+    repl: ConsoleChatREPL, mock_agent: MagicMock
+) -> None:
+    inputs = iter(["", "  ", "/quit"])
+
+    with patch.object(repl.console, "input", side_effect=inputs):
+        await repl.run()
+
+    mock_agent.astream.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_eof_exits(repl: ConsoleChatREPL) -> None:
+    with patch.object(repl.console, "input", side_effect=EOFError):
+        await repl.run()
+
+
+@pytest.mark.asyncio
+async def test_keyboard_interrupt_exits(repl: ConsoleChatREPL) -> None:
+    with patch.object(repl.console, "input", side_effect=KeyboardInterrupt):
+        await repl.run()
+
+
+@pytest.mark.asyncio
+async def test_permission_approved(
+    repl: ConsoleChatREPL, mock_agent: MagicMock
+) -> None:
+    mock_agent.astream = MagicMock(
+        return_value=_make_stream(
+            PermissionRequestEvent(
+                call_id="1",
+                tool_name="run_command",
+                server_name="shell",
+                arguments={"cmd": "rm -rf /tmp/old"},
+                reason="Tool requires user confirmation",
+            ),
+            ToolResultEvent(call_id="1", result="done"),
+            TurnCompleteEvent(final_text="Cleaned up."),
+        )
+    )
+    # First input: user message, second: "y" for approval, third: /quit
+    inputs = iter(["clean up", "y", "/quit"])
+
+    with patch.object(repl.console, "input", side_effect=inputs):
+        await repl.run()
+
+    mock_agent.approve.assert_called_once_with("1")
+    mock_agent.deny.assert_not_called()
+    output = get_output(repl)
+    assert "shell.run_command" in output
+
+
+@pytest.mark.asyncio
+async def test_permission_denied(
+    repl: ConsoleChatREPL, mock_agent: MagicMock
+) -> None:
+    mock_agent.astream = MagicMock(
+        return_value=_make_stream(
+            PermissionRequestEvent(
+                call_id="2",
+                tool_name="run_command",
+                server_name="shell",
+                arguments={"cmd": "rm -rf /"},
+                reason="Tool requires user confirmation",
+            ),
+            ToolResultEvent(
+                call_id="2",
+                result="User denied execution",
+                is_error=True,
+            ),
+            TurnCompleteEvent(final_text="Operation cancelled."),
+        )
+    )
+    inputs = iter(["delete everything", "n", "/quit"])
+
+    with patch.object(repl.console, "input", side_effect=inputs):
+        await repl.run()
+
+    mock_agent.deny.assert_called_once_with("2", "User denied execution")
+    mock_agent.approve.assert_not_called()

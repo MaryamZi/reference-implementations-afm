@@ -16,29 +16,57 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import uuid
 from typing import TYPE_CHECKING
 
+from rich.console import Console
+from rich.markdown import Markdown
 from rich.markup import escape
-from textual import work
-from textual.app import App, ComposeResult
-from textual.containers import Vertical, VerticalScroll
-from textual.widgets import Footer, Header, Input, LoadingIndicator, Static
+from rich.theme import Theme
 
 if TYPE_CHECKING:
     from ..runner import AgentRunner
 
+from ..runner import (
+    PermissionRequestEvent,
+    TokenEvent,
+    ToolCallEvent,
+    ToolResultEvent,
+    TurnCompleteEvent,
+)
+
 logger = logging.getLogger(__name__)
 
+_THEME = Theme(
+    {
+        "prompt": "bold",
+        "dim": "dim",
+        "err": "bold red",
+    }
+)
 
-class ChatApp(App):
-    CSS_PATH = "console_chat.tcss"
-    BINDINGS = [
-        ("ctrl+q", "quit", "Quit"),
-        ("ctrl+l", "clear_history", "Clear History"),
-        ("ctrl+h", "show_help", "Help"),
-    ]
+
+def _extract_tool_text(raw: str) -> str:
+    """Extract human-readable text from MCP tool result format."""
+    try:
+        parsed = json.loads(raw.replace("'", '"'))
+        if isinstance(parsed, list):
+            texts = [
+                item["text"] for item in parsed
+                if isinstance(item, dict) and "text" in item
+            ]
+            if texts:
+                return "\n".join(texts)
+    except (json.JSONDecodeError, KeyError, TypeError):
+        pass
+    return raw
+
+
+class ConsoleChatREPL:
+    """Interactive REPL for chatting with an AFM agent."""
 
     def __init__(
         self,
@@ -46,147 +74,162 @@ class ChatApp(App):
         session_id: str | None = None,
         update_notification: str | None = None,
     ):
-        super().__init__()
         self.agent = agent
         self.session_id = session_id or str(uuid.uuid4())
         self._update_notification = update_notification
+        self.console = Console(theme=_THEME)
 
-    def compose(self) -> ComposeResult:
-        yield Header()
-        yield VerticalScroll(id="chat-log")
-        yield Input(placeholder="Type a message...", id="chat-input")
-        yield Footer()
-
-    def on_mount(self) -> None:
-        logger.debug("ChatApp.on_mount called")
-        self.title = f"Chat with {self.agent.name}"
+    def _print_banner(self) -> None:
+        self.console.print()
+        self.console.print(f"[bold]{escape(self.agent.name)}[/bold]", highlight=False)
         if self.agent.description:
-            self.sub_title = self.agent.description
-
-        # Show welcome message
-        welcome_msg = (
-            f"Welcome to chat with {self.agent.name}!\n"
-            "type 'exit', 'quit' or Ctrl+Q to end.\n"
-            "type 'help' or Ctrl+H for help.\n"
-            "type 'clear' or Ctrl+L to clear history."
+            self.console.print(
+                f"[dim]{escape(self.agent.description)}[/dim]", highlight=False
+            )
+        self.console.print()
+        self.console.print(
+            "[dim]Type a message to chat. Use /help for commands, /quit to exit.[/dim]"
         )
-        self.query_one("#chat-log").mount(Static(welcome_msg, classes="system-message"))
-        self.query_one("#chat-input").focus()
+        self.console.print()
 
-        # Show update toast if available
+    def _show_help(self) -> None:
+        self.console.print()
+        self.console.print("[bold]Commands[/bold]")
+        self.console.print("  [bold]/help[/bold]   Show this help message")
+        self.console.print("  [bold]/clear[/bold]  Clear conversation history")
+        self.console.print("  [bold]/quit[/bold]   Exit the session")
+        self.console.print()
+
+    def _handle_command(self, user_input: str) -> bool:
+        """Handle a slash command. Returns True if the REPL should exit."""
+        cmd = user_input.lower().split()[0]
+        if cmd in ("/quit", "/exit"):
+            return True
+        if cmd == "/help":
+            self._show_help()
+        elif cmd == "/clear":
+            self.agent.clear_history(self.session_id)
+            self.console.print("[dim]Conversation history cleared.[/dim]")
+            self.console.print()
+        else:
+            self.console.print(f"[err]Unknown command: {escape(cmd)}[/err]")
+            self.console.print("[dim]Type /help for available commands.[/dim]")
+            self.console.print()
+        return False
+
+    async def run(self) -> None:
+        self._print_banner()
+
         if self._update_notification:
-            self.notify(self._update_notification, timeout=10)
-
-    async def on_input_submitted(self, event: Input.Submitted) -> None:
-        logger.debug(f"on_input_submitted triggered. Value: '{event.value}'")
-        try:
-            user_input = event.value.strip()
-            logger.debug(f"Input submitted: {user_input}")
-            if not user_input:
-                return
-
-            # Clear input
-            event.input.value = ""
-
-            # Handle local commands
-            command = user_input.lower()
-            if command in ("exit", "quit"):
-                self.exit()
-                return
-
-            if command == "help":
-                self.action_show_help()
-                return
-
-            if command == "clear":
-                self.action_clear_history()
-                return
-
-            # Display user message
-            chat_log = self.query_one("#chat-log")
-            msg_widget = Static(f"{escape(user_input)}", classes="message user-message")
-            await chat_log.mount(
-                Vertical(
-                    msg_widget, classes="message-container message-container--user"
-                )
+            self.console.print(
+                f"[yellow]{escape(self._update_notification)}[/yellow]"
             )
+            self.console.print()
 
-            # Send to agent
-            self._send_message(user_input)
-        except Exception:
-            logger.exception("Error in on_input_submitted")
+        loop = asyncio.get_running_loop()
 
-    @work(exclusive=True)
-    async def _send_message(self, user_input: str) -> None:
-        logger.debug(f"Sending message to agent: {user_input}")
-
-        try:
-            chat_log = self.query_one("#chat-log", VerticalScroll)
-
-            # Show thinking indicator
-            thinking = LoadingIndicator()
-            await chat_log.mount(thinking)
-            chat_log.scroll_end(animate=False)
-
-            response = await self.agent.arun(user_input, session_id=self.session_id)
-
-            # Handle non-string responses
-            if not isinstance(response, str):
-                import json
-
-                response = json.dumps(response, indent=2)
-
-            # Remove thinking and show response
-            await thinking.remove()
-            logger.debug(f"Mounting response: '{response}'")
-
-            msg_widget = Static(f"{escape(response)}", classes="message agent-message")
-            await chat_log.mount(
-                Vertical(
-                    msg_widget, classes="message-container message-container--agent"
-                )
-            )
-            chat_log.scroll_end(animate=True)
-
-        except Exception as e:
-            logger.exception("Error in _send_message")
-            # Try to report error to UI if possible
+        while True:
             try:
-                chat_log = self.query_one("#chat-log", VerticalScroll)
-                # Ensure thinking is removed if it was added
-                try:
-                    await thinking.remove()
-                except UnboundLocalError:
-                    pass
-                except Exception:
-                    logger.debug("Failed to remove thinking indicator")
-                    pass
-
-                await chat_log.mount(
-                    Static(f"[Error: {str(e)}]", classes="error-message", markup=False)
+                user_input = await loop.run_in_executor(
+                    None, lambda: self.console.input("[prompt]>[/prompt] ")
                 )
-            except Exception as e2:
-                logger.exception(f"Could not report error to UI: {e2}")
+            except (EOFError, KeyboardInterrupt):
+                self.console.print()
+                break
 
-    def action_show_help(self) -> None:
-        help_msg = (
-            "Available commands:\n"
-            "  exit, quit, Ctrl+Q  - End the chat session\n"
-            "  help,     Ctrl+H    - Show this help message\n"
-            "  clear,    Ctrl+L    - Clear conversation history"
-        )
-        self.query_one("#chat-log").mount(Static(help_msg, classes="system-message"))
-        self.query_one("#chat-log").scroll_end()
+            user_input = user_input.strip()
+            if not user_input:
+                continue
 
-    def action_clear_history(self) -> None:
-        """Clear conversation history."""
-        self.agent.clear_history(self.session_id)
-        self.query_one("#chat-log").mount(
-            Static(
-                "[Conversation history cleared]", classes="system-message", markup=False
-            )
-        )
-        self.query_one("#chat-log").scroll_end()
+            if user_input.startswith("/"):
+                if self._handle_command(user_input):
+                    break
+                continue
+
+            # Stream agent response
+            self.console.print()
+            try:
+                has_tokens = False
+                async for event in self.agent.astream(
+                    user_input, session_id=self.session_id
+                ):
+                    match event:
+                        case TokenEvent(text=chunk):
+                            # Print raw token chunks inline
+                            self.console.print(chunk, end="", highlight=False)
+                            has_tokens = True
+
+                        case ToolCallEvent(
+                            tool_name=name, server_name=server
+                        ):
+                            label = (
+                                f"{server}.{name}" if server else name
+                            )
+                            self.console.print(
+                                f"  [dim]⏺ {escape(label)}[/dim]"
+                            )
+
+                        case ToolResultEvent(is_error=True, result=result):
+                            text = _extract_tool_text(result)
+                            self.console.print(
+                                f"  [err]✗ {escape(text)}[/err]"
+                            )
+
+                        case ToolResultEvent(result=result):
+                            text = _extract_tool_text(result)
+                            preview = text[:200]
+                            if len(text) > 200:
+                                preview += "..."
+                            self.console.print(
+                                f"  [dim]✓ {escape(preview)}[/dim]"
+                            )
+
+                        case PermissionRequestEvent(
+                            call_id=cid,
+                            tool_name=name,
+                            server_name=server,
+                            arguments=args,
+                        ):
+                            label = (
+                                f"{server}.{name}" if server else name
+                            )
+                            self.console.print(
+                                f"  [bold]⏺ {escape(label)}[/bold]"
+                            )
+                            if args:
+                                self.console.print(
+                                    f"    [dim]{escape(str(args))}[/dim]"
+                                )
+                            answer = await loop.run_in_executor(
+                                None,
+                                lambda: self.console.input(
+                                    "  Allow? [bold]\\[Y/n][/bold] "
+                                ),
+                            )
+                            approved = answer.strip().lower() in (
+                                "",
+                                "y",
+                                "yes",
+                            )
+                            if approved:
+                                await self.agent.approve(cid)
+                            else:
+                                await self.agent.deny(
+                                    cid, "User denied execution"
+                                )
+
+                        case TurnCompleteEvent(final_text=text):
+                            if has_tokens:
+                                # Tokens were already printed inline
+                                self.console.print()
+                            elif text:
+                                self.console.print(Markdown(text))
+
+            except Exception as e:
+                logger.exception("Agent error")
+                self.console.print(f"[err]Error: {escape(str(e))}[/err]")
+
+            self.console.print()
 
 
 async def async_run_console_chat(
@@ -197,5 +240,7 @@ async def async_run_console_chat(
     from ..update import get_update_notification
 
     update_msg = get_update_notification()
-    app = ChatApp(agent, session_id=session_id, update_notification=update_msg)
-    await app.run_async()
+    repl = ConsoleChatREPL(
+        agent, session_id=session_id, update_notification=update_msg
+    )
+    await repl.run()

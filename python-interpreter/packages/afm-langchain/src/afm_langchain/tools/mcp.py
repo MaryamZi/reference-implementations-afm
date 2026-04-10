@@ -206,12 +206,16 @@ class MCPManager:
         self._servers = servers
         self._clients: list[MCPClient] = []
         self._tools: list[BaseTool] | None = None
+        self._tool_to_server: dict[str, str] = {}
+        self._confirmation_servers: set[str] = set()
 
         # Create clients for each server
         for server in servers:
             try:
                 client = MCPClient.from_mcp_server(server)
                 self._clients.append(client)
+                if server.confirmation == "required":
+                    self._confirmation_servers.add(server.name)
             except MCPError as e:
                 logger.warning(f"Skipping MCP server: {e}")
 
@@ -242,6 +246,8 @@ class MCPManager:
         for client in self._clients:
             try:
                 tools = await client.get_tools()
+                for tool in tools:
+                    self._tool_to_server[tool.name] = client.name
                 all_tools.extend(tools)
             except MCPConnectionError as e:
                 errors.append(str(e))
@@ -259,5 +265,18 @@ class MCPManager:
 
         return all_tools
 
+    @property
+    def tool_to_server(self) -> dict[str, str]:
+        """Mapping of tool name to the MCP server name that provides it."""
+        return self._tool_to_server
+
+    def requires_confirmation(self, tool_name: str) -> bool:
+        """Check if a tool requires user confirmation before execution."""
+        server_name = self._tool_to_server.get(tool_name)
+        if server_name is None:
+            return False
+        return server_name in self._confirmation_servers
+
     def clear_cache(self) -> None:
         self._tools = None
+        self._tool_to_server = {}

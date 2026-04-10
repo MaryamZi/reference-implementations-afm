@@ -101,6 +101,7 @@ class MCPServer(BaseModel):
     name: str
     transport: Transport
     tool_filter: ToolFilter | None = None
+    confirmation: str | None = None  # "required" or "auto" (default)
 
 
 class Tools(BaseModel):

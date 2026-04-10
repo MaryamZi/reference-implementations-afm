@@ -16,16 +16,25 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from types import TracebackType
-from typing import Any
+from typing import Any, AsyncIterator
 
 from afm.exceptions import AgentError, InputValidationError, OutputValidationError
 from afm.models import (
     AFMRecord,
     Interface,
     Signature,
+)
+from afm.runner import (
+    AgentEvent,
+    PermissionRequestEvent,
+    TokenEvent,
+    ToolCallEvent,
+    ToolResultEvent,
+    TurnCompleteEvent,
 )
 from afm.schema_validator import (
     build_output_schema_instruction,
@@ -66,6 +75,10 @@ class LangChainRunner:
         self._external_tools = tools or []
         self._mcp_tools: list[BaseTool] = []
         self._connected = False
+
+        # Permission gating for astream()
+        self._permission_gates: dict[str, asyncio.Event] = {}
+        self._permission_denials: dict[str, str] = {}
 
         # Skills
         self._skill_catalog: str | None = None
@@ -322,6 +335,175 @@ class LangChainRunner:
             if isinstance(e, AgentError):
                 raise
             raise AgentError(f"Agent execution failed: {e}") from e
+
+    def _get_server_name(self, tool_name: str) -> str:
+        """Look up the MCP server name for a tool."""
+        if self._mcp_manager is not None:
+            return self._mcp_manager.tool_to_server.get(tool_name, "")
+        return ""
+
+    def _requires_confirmation(self, tool_name: str) -> bool:
+        """Check if a tool requires user confirmation before execution."""
+        if self._mcp_manager is not None:
+            return self._mcp_manager.requires_confirmation(tool_name)
+        return False
+
+    async def astream(
+        self,
+        input_data: str | dict[str, Any],
+        *,
+        session_id: str = "default",
+    ) -> AsyncIterator[AgentEvent]:
+        try:
+            user_input = self._prepare_input(input_data)
+            session_history = self._get_session_history(session_id)
+            original_input = user_input
+            messages: list[Any] = self._build_messages(user_input, session_history)
+
+            max_iterations = (
+                self.max_iterations if self.max_iterations is not None else 10
+            )
+            iterations = 0
+            final_text: str | None = None
+
+            while iterations < max_iterations:
+                # Stream tokens from the model
+                full_response = None
+                async for chunk in self._model.astream(messages):
+                    if full_response is None:
+                        full_response = chunk
+                    else:
+                        full_response = full_response + chunk
+
+                    if chunk.content:
+                        yield TokenEvent(text=chunk.content)
+
+                if full_response is None:
+                    raise AgentError("No response from LLM")
+
+                # If no tool calls, we're done
+                if not full_response.tool_calls:
+                    final_text = self._extract_response_content(full_response)
+                    break
+
+                # Add assistant message to conversation
+                messages.append(full_response)
+
+                # Execute tool calls
+                for tool_call in full_response.tool_calls:
+                    tool_name = tool_call["name"]
+                    call_id = tool_call["id"]
+                    server_name = self._get_server_name(tool_name)
+
+                    # Permission gating for confirmation: required tools
+                    if self._requires_confirmation(tool_name):
+                        gate = asyncio.Event()
+                        self._permission_gates[call_id] = gate
+                        yield PermissionRequestEvent(
+                            call_id=call_id,
+                            tool_name=tool_name,
+                            server_name=server_name,
+                            arguments=tool_call["args"],
+                            reason="Tool requires user confirmation",
+                        )
+                        await gate.wait()
+
+                        # Check if denied
+                        denial = self._permission_denials.pop(call_id, None)
+                        self._permission_gates.pop(call_id, None)
+                        if denial is not None:
+                            tool_output = (
+                                denial or "User denied tool execution"
+                            )
+                            yield ToolResultEvent(
+                                call_id=call_id,
+                                result=tool_output,
+                                is_error=True,
+                            )
+                            messages.append(
+                                ToolMessage(
+                                    content=tool_output,
+                                    tool_call_id=call_id,
+                                )
+                            )
+                            continue
+                    else:
+                        yield ToolCallEvent(
+                            call_id=call_id,
+                            tool_name=tool_name,
+                            server_name=server_name,
+                            arguments=tool_call["args"],
+                        )
+
+                    tool = next(
+                        (t for t in self.tools if t.name == tool_name), None
+                    )
+
+                    if tool is None:
+                        tool_output = f"Error: Tool '{tool_name}' not found."
+                        is_error = True
+                    else:
+                        try:
+                            tool_output = await tool.ainvoke(tool_call["args"])
+                            is_error = False
+                        except Exception as e:
+                            tool_output = (
+                                f"Error executing tool '{tool_name}': {e}"
+                            )
+                            is_error = True
+
+                    yield ToolResultEvent(
+                        call_id=call_id,
+                        result=str(tool_output),
+                        is_error=is_error,
+                    )
+
+                    messages.append(
+                        ToolMessage(
+                            content=str(tool_output),
+                            tool_call_id=call_id,
+                        )
+                    )
+
+                iterations += 1
+
+            if iterations >= max_iterations and full_response and full_response.tool_calls:
+                logger.warning(
+                    f"Max iterations ({max_iterations}) reached with "
+                    f"{len(full_response.tool_calls)} pending tool calls: "
+                    f"{[tc['name'] for tc in full_response.tool_calls]}"
+                )
+
+            # Update session history
+            if final_text is not None:
+                session_history.append(HumanMessage(content=original_input))
+                session_history.append(AIMessage(content=final_text))
+
+                # Validate and coerce output
+                output_schema = self._signature.output
+                coerced = coerce_output_to_schema(final_text, output_schema)
+                if isinstance(coerced, str):
+                    final_text = coerced
+                else:
+                    final_text = json.dumps(coerced, indent=2)
+
+            yield TurnCompleteEvent(final_text=final_text)
+
+        except (InputValidationError, OutputValidationError, AgentError):
+            raise
+        except Exception as e:
+            raise AgentError(f"Agent execution failed: {e}") from e
+
+    async def approve(self, call_id: str) -> None:
+        gate = self._permission_gates.get(call_id)
+        if gate is not None:
+            gate.set()
+
+    async def deny(self, call_id: str, reason: str = "") -> None:
+        self._permission_denials[call_id] = reason
+        gate = self._permission_gates.get(call_id)
+        if gate is not None:
+            gate.set()
 
     def clear_history(self, session_id: str = "default") -> None:
         if session_id in self._sessions:
