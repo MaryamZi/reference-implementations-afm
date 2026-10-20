@@ -1,5 +1,5 @@
 ---
-spec_version: '0.3.0'
+spec_version: '0.4.0'
 name: "TelegramTestAgent"
 description: "A test agent for telegram platformchat notification mode."
 author: "Copilot"

@@ -1,5 +1,5 @@
 ---
-spec_version: '0.3.0'
+spec_version: '0.4.0'
 name: "SlackTestAgent"
 description: "A test agent for slack platformchat notification mode."
 author: "Copilot"

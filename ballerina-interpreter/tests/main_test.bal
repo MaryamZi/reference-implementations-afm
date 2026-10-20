@@ -268,7 +268,7 @@ function testValidateHttpVariablesMessageMentionsPlatformChatPrompt() {
 function testValidateHttpVariablesInPlatformChatConfig() {
     AFMRecord afmRecord = {
         metadata: {
-            spec_version: "0.3.0",
+            spec_version: "0.4.0",
             interfaces: [
                 <SlackPlatformChatInterface>{
                     platform_config: {signing_secret: "${http:header.Authorization}"}
@@ -316,6 +316,66 @@ Agent instructions here.`;
     test:assertEquals(parsed?.metadata?.spec_version, "0.3.0");
     test:assertEquals(parsed.role, "Agent role here.");
     test:assertEquals(parsed.instructions, "Agent instructions here.");
+}
+
+function platformChatAfmWithSpecVersion(string specVersion) returns string => string `---
+spec_version: "${specVersion}"
+interfaces:
+  - type: platformchat
+    platform: slack
+    prompt: "hi"
+    platform_config:
+      signing_secret: "secret"
+---
+
+# Role
+Role.
+
+# Instructions
+Instructions.`;
+
+@test:Config
+function testParseAfmRejectsPlatformChatOnSpecVersion030() {
+    AFMRecord|error result = parseAfm(platformChatAfmWithSpecVersion("0.3.0"));
+    if result is AFMRecord {
+        test:assertFail("Expected platformchat to be rejected on spec_version 0.3.0");
+    }
+    test:assertEquals(result.message(),
+            "'platformchat' interface requires spec_version 0.4.0 or later (found '0.3.0').");
+}
+
+@test:Config
+function testParseAfmAcceptsPlatformChatOnSpecVersion040() returns error? {
+    AFMRecord parsed = check parseAfm(platformChatAfmWithSpecVersion("0.4.0"));
+    test:assertTrue((parsed?.metadata?.interfaces ?: [])[0] is SlackPlatformChatInterface);
+}
+
+@test:Config
+function testParseAfmAcceptsPlatformChatOnNewerUnknownSpecVersion() returns error? {
+    AFMRecord parsed = check parseAfm(platformChatAfmWithSpecVersion("9.9.9"));
+    test:assertEquals(parsed?.metadata?.spec_version, "9.9.9");
+}
+
+@test:Config
+function testParseAfmAcceptsPlatformChatOnNonNumericSpecVersion() returns error? {
+    AFMRecord parsed = check parseAfm(platformChatAfmWithSpecVersion("next"));
+    test:assertEquals(parsed?.metadata?.spec_version, "next");
+}
+
+@test:Config
+function testParseSpecVersion() {
+    test:assertEquals(parseSpecVersion("0.4.0"), [0, 4, 0]);
+    test:assertEquals(parseSpecVersion("1.2"), [1, 2]);
+    test:assertEquals(parseSpecVersion("0.4.x"), ());
+    test:assertEquals(parseSpecVersion(""), ());
+}
+
+@test:Config
+function testSpecVersionOrdering() {
+    test:assertTrue(<int[]>parseSpecVersion("0.3.9") < PLATFORMCHAT_MIN_SPEC_VERSION);
+    test:assertTrue(<int[]>parseSpecVersion("0.4") < PLATFORMCHAT_MIN_SPEC_VERSION);
+    test:assertFalse(<int[]>parseSpecVersion("0.4.0") < PLATFORMCHAT_MIN_SPEC_VERSION);
+    test:assertFalse(<int[]>parseSpecVersion("0.10.0") < PLATFORMCHAT_MIN_SPEC_VERSION);
 }
 
 // ============================================
