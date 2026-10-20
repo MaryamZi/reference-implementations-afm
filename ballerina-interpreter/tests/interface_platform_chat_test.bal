@@ -456,3 +456,31 @@ function testSlackEndpointIgnoresMessageChangedSubtype() returns error? {
 
     check testListener.gracefulStop();
 }
+
+// ============================================
+// Polling response headers
+// ============================================
+
+@test:Config
+function testCollectResponseHeadersSingleAndMultiValue() {
+    http:Response response = new;
+    response.setHeader("X-Single", "one");
+    response.addHeader("X-Multi", "first");
+    response.addHeader("X-Multi", "second");
+
+    map<string|string[]> headers = collectResponseHeaders(response);
+    test:assertEquals(headers["X-Single"], "one");
+    test:assertEquals(headers["X-Multi"], ["first", "second"]);
+}
+
+@test:Config
+function testBuildUserPromptSubstitutesPollResponseHeaders() returns error? {
+    http:Response response = new;
+    response.setHeader("X-Test", "abc");
+    readonly & map<string|string[]> headers = collectResponseHeaders(response).cloneReadOnly();
+
+    readonly & CompiledTemplate compiled =
+            (check compileTemplate("${http:payload.message.text} via ${http:header.X-Test}")).cloneReadOnly();
+    string prompt = check buildUserPrompt(compiled, {message: {text: "hello"}}, headers);
+    test:assertEquals(prompt, "hello via abc");
+}

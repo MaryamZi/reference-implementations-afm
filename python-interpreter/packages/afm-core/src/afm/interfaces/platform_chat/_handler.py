@@ -111,13 +111,16 @@ class PlatformHandler(ABC):
 
     async def poll_updates(
         self, state: dict[str, Any]
-    ) -> tuple[list[Any], dict[str, Any]]:
+    ) -> tuple[list[Any], Mapping[str, str], dict[str, Any]]:
         """Fetch one batch of updates from the platform.
 
-        Returns ``(updates, next_state)``. ``state`` is passed through
-        opaquely between calls so the handler can track cursors / offsets;
-        the framework persists it across iterations within a single
-        process (no disk persistence in this implementation).
+        Returns ``(updates, headers, next_state)``. ``headers`` are the
+        response headers from the poll call and are replayed to every
+        update in the batch so ``${http:header.*}`` substitution has a
+        source in polling prompts. ``state`` is passed through opaquely
+        between calls so the handler can track cursors / offsets; the
+        framework persists it across iterations within a single process
+        (no disk persistence in this implementation).
 
         Default raises: only platforms that include
         ``PlatformChatMode.POLLING`` in ``supported_modes`` need to override

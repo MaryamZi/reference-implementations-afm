@@ -117,9 +117,12 @@ type PlatformHandler isolated object {
     # invoked on handlers constructed for polling-mode interfaces.
     #
     # + state - Caller-managed polling state (e.g. cursor / offset)
-    # + return - `[updates, nextState]` on success; an `error` on a polling
-    #            failure (the caller backs off and retries)
-    isolated function pollUpdates(map<json> state) returns [json[], map<json>]|error;
+    # + return - `[updates, headers, nextState]` on success, where `headers` are the
+    #            poll response's headers, made available to every update in the batch
+    #            for `${http:header.*}` substitution; an `error` on a polling failure
+    #            (the caller backs off and retries)
+    isolated function pollUpdates(map<json> state)
+        returns [json[], map<string|string[]>, map<json>]|error;
 };
 
 isolated function createPlatformHandler(PlatformChatInterface interface,
@@ -316,14 +319,15 @@ isolated function runPlatformChatPollingLoop(ai:Agent agent,
             string `(interval=${intervalSeconds}s)`);
 
     while true {
-        [json[], map<json>]|error pollResult = handler.pollUpdates(state);
+        [json[], map<string|string[]>, map<json>]|error pollResult = handler.pollUpdates(state);
         if pollResult is error {
             log:printError("Polling iteration failed; sleeping before retry", pollResult);
             runtime:sleep(intervalSeconds);
             continue;
         }
 
-        [json[], map<json>] [updates, nextState] = pollResult;
+        [json[], map<string|string[]>, map<json>] [updates, headers, nextState] = pollResult;
+        readonly & map<string|string[]> roHeaders = headers.cloneReadOnly();
 
         foreach json update in updates {
             boolean|error ignore = handler.shouldIgnore(update);
@@ -334,7 +338,7 @@ isolated function runPlatformChatPollingLoop(ai:Agent agent,
             if ignore {
                 continue;
             }
-            _ = dispatchWithRetry(handler, agent, update.cloneReadOnly(), compiledPrompt);
+            _ = dispatchWithRetry(handler, agent, update.cloneReadOnly(), roHeaders, compiledPrompt);
         }
 
         // Advance the cursor only after the dispatch loop has had its chance
@@ -355,10 +359,10 @@ isolated function getPollingIntervalSeconds(Polling polling) returns decimal|Con
 }
 
 isolated function dispatchWithRetry(PlatformHandler handler, ai:Agent agent,
-        readonly & json payload, readonly & CompiledTemplate? compiledPrompt)
-        returns boolean {
+        readonly & json payload, readonly & map<string|string[]> headers,
+        readonly & CompiledTemplate? compiledPrompt) returns boolean {
     foreach int attempt in 0 ..< MAX_DISPATCH_ATTEMPTS {
-        boolean success = dispatchPlatformUpdate(handler, agent, payload, (), compiledPrompt);
+        boolean success = dispatchPlatformUpdate(handler, agent, payload, headers, compiledPrompt);
         if success {
             return true;
         }
@@ -388,15 +392,25 @@ isolated function collectHeaders(http:Request req) returns map<string|string[]> 
     foreach string name in req.getHeaderNames() {
         string[]|http:HeaderNotFoundError values = req.getHeaders(name);
         if values is string[] {
-            if values.length() == 1 {
-                headers[name] = values[0];
-            } else {
-                headers[name] = values;
-            }
+            headers[name] = toHeaderValue(values);
         }
     }
     return headers;
 }
+
+isolated function collectResponseHeaders(http:Response response) returns map<string|string[]> {
+    map<string|string[]> headers = {};
+    foreach string name in response.getHeaderNames() {
+        string[]|http:HeaderNotFoundError values = response.getHeaders(name);
+        if values is string[] {
+            headers[name] = toHeaderValue(values);
+        }
+    }
+    return headers;
+}
+
+isolated function toHeaderValue(string[] values) returns string|string[] =>
+    values.length() == 1 ? values[0] : values;
 
 isolated function parseJsonBody(byte[] body) returns json|error {
     string|error bodyStr = string:fromBytes(body);
