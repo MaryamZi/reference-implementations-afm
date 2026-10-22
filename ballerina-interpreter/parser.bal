@@ -15,9 +15,17 @@
 // under the License.
 
 import ballerina/data.yaml;
+import ballerina/log;
 import ballerina/os;
 
 const HTTP_VARIABLE_ALLOWED_PROMPT_FIELDS = "webhook and platformchat prompt fields";
+
+// AFM spec versions this implementation knows how to parse. Add new versions here;
+// keep older entries while changes remain backwards-compatible.
+final readonly & string[] SUPPORTED_SPEC_VERSIONS = ["0.3.0", "0.4.0"];
+
+// Minimum spec version that introduced the platformchat interface.
+final readonly & int[] PLATFORMCHAT_MIN_SPEC_VERSION = [0, 4, 0];
 
 function parseAfm(string content) returns AFMRecord|error {
     string resolvedContent = check resolveVariables(content);
@@ -63,11 +71,62 @@ function parseAfm(string content) returns AFMRecord|error {
         instructions: instructions.trim()
     };
 
+    string? specVersion = metadata?.spec_version;
+    warnOnSpecVersion(specVersion);
+    check checkFeatureSpecVersionRequirements(specVersion, metadata?.interfaces);
+
     // Validate that http: variables only appear in webhook prompts
     check validateHttpVariables(afmRecord);
 
     return afmRecord;
 }
+
+function warnOnSpecVersion(string? specVersion) {
+    string supported = string:'join(", ", ...SUPPORTED_SPEC_VERSIONS);
+    if specVersion is () {
+        log:printWarn(string `AFM file has no 'spec_version'; expected one of: ${supported}. Proceeding anyway.`);
+        return;
+    }
+
+    if SUPPORTED_SPEC_VERSIONS.indexOf(specVersion) is () {
+        log:printWarn(string `AFM file 'spec_version' '${specVersion}' is not in the supported set (${supported}). ` +
+                "Proceeding anyway; some fields may not be recognized.");
+    }
+}
+
+function checkFeatureSpecVersionRequirements(string? specVersion, Interface[]? interfaces) returns error? {
+    if specVersion is () || interfaces is () {
+        return;
+    }
+
+    int[]? declared = parseSpecVersion(specVersion);
+    if declared is () || declared >= PLATFORMCHAT_MIN_SPEC_VERSION {
+        return;
+    }
+
+    foreach Interface interface in interfaces {
+        if interface is PlatformChatInterface {
+            return error(string `'platformchat' interface requires spec_version ` +
+                    string `${formatSpecVersion(PLATFORMCHAT_MIN_SPEC_VERSION)} or later (found '${specVersion}').`);
+        }
+    }
+}
+
+// Returns the numeric components of a dotted version string, or `()` if any component is not an integer.
+function parseSpecVersion(string specVersion) returns int[]? {
+    int[] components = [];
+    foreach string component in re `\.`.split(specVersion) {
+        int|error parsed = int:fromString(component);
+        if parsed is error {
+            return ();
+        }
+        components.push(parsed);
+    }
+    return components;
+}
+
+function formatSpecVersion(int[] components) returns string =>
+    string:'join(".", ...components.'map(component => component.toString()));
 
 function resolveVariables(string content) returns string|error {
     string result = content;

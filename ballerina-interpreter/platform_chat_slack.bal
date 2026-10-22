@@ -255,7 +255,8 @@ isolated class SlackHandler {
         return error ConfigError("Platform 'slack' does not support request mode");
     }
 
-    isolated function pollUpdates(map<json> state) returns [json[], map<json>]|error {
+    isolated function pollUpdates(map<json> state)
+            returns [json[], map<string|string[]>, map<json>]|error {
         return error("Platform 'slack' does not support polling mode");
     }
 }

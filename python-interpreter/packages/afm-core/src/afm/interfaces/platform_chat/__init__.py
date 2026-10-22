@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request
@@ -201,7 +202,7 @@ async def run_polling_loop(
 
         while not stop.is_set():
             try:
-                updates, next_state = await handler.poll_updates(state)
+                updates, headers, next_state = await handler.poll_updates(state)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -217,6 +218,7 @@ async def run_polling_loop(
                     handler=handler,
                     agent=agent,
                     payload=update,
+                    headers=headers,
                     compiled_prompt=compiled_prompt,
                     stop=stop,
                 )
@@ -243,6 +245,7 @@ async def _dispatch_with_retry(
     handler: PlatformHandler,
     agent: AgentRunner,
     payload: Any,
+    headers: Mapping[str, str],
     compiled_prompt: CompiledTemplate | None,
     stop: asyncio.Event,
 ) -> bool:
@@ -258,7 +261,7 @@ async def _dispatch_with_retry(
                 handler=handler,
                 agent=agent,
                 payload=payload,
-                headers={},
+                headers=headers,
                 compiled_prompt=compiled_prompt,
             )
         except asyncio.CancelledError:
@@ -319,7 +322,7 @@ async def dispatch_update(
     handler: PlatformHandler,
     agent: AgentRunner,
     payload: Any,
-    headers: dict[str, str],
+    headers: Mapping[str, str],
     compiled_prompt: CompiledTemplate | None,
 ) -> bool:
     """Background-style per-update dispatch shared by notification mode

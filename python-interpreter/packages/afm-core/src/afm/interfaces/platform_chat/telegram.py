@@ -222,7 +222,7 @@ class TelegramHandler(PlatformHandler):
 
     async def poll_updates(
         self, state: dict[str, Any]
-    ) -> tuple[list[Any], dict[str, Any]]:
+    ) -> tuple[list[Any], Mapping[str, str], dict[str, Any]]:
         if not self._bot_token:
             raise RuntimeError(
                 "Telegram polling requires a non-empty platform_config.bot_token"
@@ -288,7 +288,7 @@ class TelegramHandler(PlatformHandler):
             )
             next_state["offset"] = max_id + 1
 
-        return updates, next_state
+        return updates, response.headers, next_state
 
     async def aclose(self) -> None:
         if self._http_client is not None:

@@ -1431,6 +1431,7 @@ class TestPollingModelValidation:
 
 def _make_telegram_polling_interface(
     bot_token: str = "123:abc",
+    prompt: str | None = None,
 ) -> PlatformChatInterface:
     return PlatformChatInterface(
         type="platformchat",
@@ -1438,16 +1439,18 @@ def _make_telegram_polling_interface(
         mode=PlatformChatMode.POLLING,
         platform_config={"bot_token": bot_token},
         polling=Polling(interval=0, timeout=0),
+        prompt=prompt,
     )
 
 
 def _mock_async_client_factory(
     monkeypatch: pytest.MonkeyPatch,
     get_responses: list[dict | Exception],
+    response_headers: dict[str, str] | None = None,
 ) -> list[dict]:
     """Patch httpx.AsyncClient in telegram.py to return successive canned
-    JSON bodies from ``get_responses``. Returns a list that records each
-    GET call's (url, params) for assertion."""
+    JSON bodies from ``get_responses``, each carrying ``response_headers``.
+    Returns a list that records each GET call's (url, params) for assertion."""
     calls: list[dict] = []
     iterator = iter(get_responses)
 
@@ -1455,6 +1458,7 @@ def _mock_async_client_factory(
         resp = MagicMock()
         resp.json.return_value = body
         resp.raise_for_status.return_value = None
+        resp.headers = httpx.Headers(response_headers or {})
         return resp
 
     async def fake_get(url: str, params: dict | None = None) -> MagicMock:
@@ -1493,7 +1497,7 @@ class TestTelegramHandlerPollUpdates:
     ) -> None:
         calls = _mock_async_client_factory(monkeypatch, [{"ok": True, "result": []}])
         handler = TelegramHandler(_make_telegram_polling_interface())
-        updates, state = await handler.poll_updates({})
+        updates, _, state = await handler.poll_updates({})
         assert updates == []
         assert state == {}
         assert calls[0]["params"] == {"timeout": 0}
@@ -1515,7 +1519,7 @@ class TestTelegramHandlerPollUpdates:
             ],
         )
         handler = TelegramHandler(_make_telegram_polling_interface())
-        updates, state = await handler.poll_updates({})
+        updates, _, state = await handler.poll_updates({})
         assert len(updates) == 2
         assert state == {"offset": 13}
         assert calls[0]["params"] == {"timeout": 0}
@@ -1535,9 +1539,22 @@ class TestTelegramHandlerPollUpdates:
     ) -> None:
         _mock_async_client_factory(monkeypatch, [{"ok": True, "result": []}])
         handler = TelegramHandler(_make_telegram_polling_interface())
-        updates, state = await handler.poll_updates({"offset": 42})
+        updates, _, state = await handler.poll_updates({"offset": 42})
         assert updates == []
         assert state == {"offset": 42}
+
+    @pytest.mark.asyncio
+    async def test_returns_response_headers(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _mock_async_client_factory(
+            monkeypatch,
+            [{"ok": True, "result": []}],
+            response_headers={"X-Test": "abc"},
+        )
+        handler = TelegramHandler(_make_telegram_polling_interface())
+        _, headers, _ = await handler.poll_updates({})
+        assert headers["x-test"] == "abc"
 
     @pytest.mark.asyncio
     async def test_not_ok_response_raises(
@@ -1849,17 +1866,62 @@ class TestRunPollingLoop:
         assert session_id == "telegram:99:99"
 
     @pytest.mark.asyncio
+    async def test_loop_substitutes_poll_response_headers_in_prompt(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _mock_async_client_factory(
+            monkeypatch,
+            [
+                {
+                    "ok": True,
+                    "result": [
+                        {
+                            "update_id": 1,
+                            "message": {
+                                "from": {"id": 99, "is_bot": False},
+                                "chat": {"id": 99, "type": "private"},
+                                "text": "hello",
+                            },
+                        }
+                    ],
+                },
+            ],
+            response_headers={"X-Test": "abc"},
+        )
+
+        seen_prompts: list[str] = []
+        stop_event = asyncio.Event()
+
+        async def arun(prompt: str, session_id: str = "default") -> str:
+            seen_prompts.append(prompt)
+            stop_event.set()
+            return "ok"
+
+        agent = MagicMock()
+        agent.arun = arun
+
+        iface = _make_telegram_polling_interface(
+            prompt="${http:payload.message.text} via ${http:header.X-Test}"
+        )
+
+        await asyncio.wait_for(
+            run_polling_loop(agent, iface, stop_event=stop_event), timeout=5
+        )
+
+        assert seen_prompts == ["hello via abc"]
+
+    @pytest.mark.asyncio
     async def test_loop_continues_after_poll_exception(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         call_counter = {"n": 0}
 
         class FlakyHandler(TelegramHandler):
-            async def poll_updates(self, state: dict) -> tuple[list, dict]:
+            async def poll_updates(self, state: dict) -> tuple[list, dict, dict]:
                 call_counter["n"] += 1
                 if call_counter["n"] == 1:
                     raise RuntimeError("transient")
-                return [], state
+                return [], {}, state
 
         monkeypatch.setitem(
             __import__(
@@ -2190,30 +2252,34 @@ class TestRunPollingLoop:
                 self.seen_states: list[dict] = []
                 instances.append(self)
 
-            async def poll_updates(self, state: dict) -> tuple[list, dict]:
+            async def poll_updates(self, state: dict) -> tuple[list, dict, dict]:
                 self.seen_states.append(dict(state))
                 if len(self.seen_states) == 1:
-                    return [
-                        {
-                            "update_id": 1,
-                            "message": {
-                                "from": {"id": 99, "is_bot": False},
-                                "chat": {"id": 99, "type": "private"},
-                                "text": "first",
+                    return (
+                        [
+                            {
+                                "update_id": 1,
+                                "message": {
+                                    "from": {"id": 99, "is_bot": False},
+                                    "chat": {"id": 99, "type": "private"},
+                                    "text": "first",
+                                },
                             },
-                        },
-                        {
-                            "update_id": 2,
-                            "message": {
-                                "from": {"id": 99, "is_bot": False},
-                                "chat": {"id": 99, "type": "private"},
-                                "text": "second",
+                            {
+                                "update_id": 2,
+                                "message": {
+                                    "from": {"id": 99, "is_bot": False},
+                                    "chat": {"id": 99, "type": "private"},
+                                    "text": "second",
+                                },
                             },
-                        },
-                    ], {"offset": 3}
+                        ],
+                        {},
+                        {"offset": 3},
+                    )
 
                 stop_event.set()
-                return [], state
+                return [], {}, state
 
         monkeypatch.setitem(
             platform_chat_module._HANDLER_CLASSES, "telegram", RecordingHandler

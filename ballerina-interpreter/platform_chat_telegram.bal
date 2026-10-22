@@ -249,7 +249,8 @@ isolated class TelegramHandler {
         return error ConfigError("Platform 'telegram' does not support request mode");
     }
 
-    isolated function pollUpdates(map<json> state) returns [json[], map<json>]|error {
+    isolated function pollUpdates(map<json> state)
+            returns [json[], map<string|string[]>, map<json>]|error {
         string? botToken = self.botToken;
         http:Client? telegramClient = self.telegramClient;
         if botToken is () || telegramClient is () {
@@ -274,7 +275,9 @@ isolated class TelegramHandler {
             return error(string `Telegram getUpdates returned HTTP ${response.statusCode}`);
         }
 
-        return parseTelegramGetUpdatesResponse(check response.getJsonPayload(), state);
+        [json[], map<json>] [updates, nextState] =
+                check parseTelegramGetUpdatesResponse(check response.getJsonPayload(), state);
+        return [updates, collectResponseHeaders(response), nextState];
     }
 }
 
