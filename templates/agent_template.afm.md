@@ -117,17 +117,18 @@ interfaces:
 
   # Telegram (polling — getUpdates long-poll).
   # Use this instead of the notification block above when you can't expose
-  # a public webhook URL. Telegram disallows both at once for the same bot.
-  - type: platformchat
-    platform: telegram
-    mode: polling
-    prompt: |
-      Reply to ${http:payload.message.text}
-    platform_config:
-      bot_token: "${env:TELEGRAM_BOT_TOKEN}"
-    polling:
-      interval: 1                        # seconds between getUpdates calls
-      timeout: 30                        # Telegram long-poll timeout (max 50)
+  # a public webhook URL. Telegram disallows both at once for the same bot,
+  # so it is commented out here.
+  # - type: platformchat
+  #   platform: telegram
+  #   mode: polling
+  #   prompt: |
+  #     Reply to ${http:payload.message.text}
+  #   platform_config:
+  #     bot_token: "${env:TELEGRAM_BOT_TOKEN}"
+  #   polling:
+  #     interval: 1                      # seconds between getUpdates calls (must be > 0)
+  #     timeout: 30                      # Telegram long-poll timeout (max 50)
 
 # ============================================================================
 # TOOLS - OPTIONAL

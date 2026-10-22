@@ -928,6 +928,38 @@ class TestSlackConfig:
         assert config.signing_secret is None
 
 
+class TestGChatRequestResponse:
+    @staticmethod
+    def _handler() -> GChatHandler:
+        return GChatHandler(
+            PlatformChatInterface(
+                type="platformchat",
+                platform="gchat",
+                mode=PlatformChatMode.REQUEST,
+                platform_config={"project_number": "1234567890"},
+                exposure=Exposure(http=HTTPExposure(path="/gchat")),
+            ),
+            verify_signatures=False,
+        )
+
+    def test_string_result_sent_as_text(self) -> None:
+        response = self._handler().create_request_response("Hello")
+        assert json.loads(response.body) == {"text": "Hello"}
+
+    def test_message_shaped_dict_sent_as_is(self) -> None:
+        message = {"text": "Structured hello", "cardsV2": []}
+        response = self._handler().create_request_response(message)
+        assert json.loads(response.body) == message
+
+    def test_dict_without_message_content_serialized_as_text(self) -> None:
+        response = self._handler().create_request_response({"answer": "42"})
+        assert json.loads(response.body) == {"text": '{"answer": "42"}'}
+
+    def test_empty_dict_serialized_as_text(self) -> None:
+        response = self._handler().create_request_response({})
+        assert json.loads(response.body) == {"text": "{}"}
+
+
 class TestGChatConfig:
     def test_valid_project_number(self) -> None:
         config = GChatConfig.model_validate({"project_number": "abc"})
@@ -1418,11 +1450,11 @@ class TestPollingModelValidation:
         with pytest.raises(ValidationError):
             Polling.model_validate({"interval": -1})
 
-    def test_zero_interval_allowed(self) -> None:
-        # interval=0 is meaningful: "no sleep between cycles", typical
-        # when timeout is set and the platform long-polls.
-        config = Polling.model_validate({"interval": 0})
-        assert config.interval == 0
+    def test_zero_interval_rejected(self) -> None:
+        # Zero would poll in a tight loop whenever the platform answers
+        # immediately (no long-poll timeout, or a persistent error).
+        with pytest.raises(ValidationError):
+            Polling.model_validate({"interval": 0})
 
     def test_negative_timeout_rejected(self) -> None:
         with pytest.raises(ValidationError):
@@ -1438,7 +1470,7 @@ def _make_telegram_polling_interface(
         platform="telegram",
         mode=PlatformChatMode.POLLING,
         platform_config={"bot_token": bot_token},
-        polling=Polling(interval=0, timeout=0),
+        polling=Polling(interval=1, timeout=0),
         prompt=prompt,
     )
 

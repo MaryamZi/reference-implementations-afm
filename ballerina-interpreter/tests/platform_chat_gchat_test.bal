@@ -193,3 +193,37 @@ function testGetGChatServiceConfigEmptyProjectNumberString() {
     GChatProjectNumberOnly config = {project_number: "   "};
     test:assertEquals(getGChatServiceConfig(config), ());
 }
+
+// ============================================
+// toGChatReply
+// ============================================
+
+@test:Config
+function testToGChatReplyStringSentAsRawText() {
+    chat:Message reply = toGChatReply("Hello");
+    test:assertEquals(reply.text, "Hello");
+}
+
+@test:Config
+function testToGChatReplyMessageShapedMapSentAsIs() {
+    chat:Message reply = toGChatReply({text: "Structured hello"});
+    test:assertEquals(reply.text, "Structured hello");
+}
+
+@test:Config
+function testToGChatReplyMapWithoutMessageContentSerialized() {
+    chat:Message reply = toGChatReply({answer: "42"});
+    test:assertEquals(reply.text, "{\"answer\":\"42\"}");
+}
+
+@test:Config
+function testToGChatReplyEmptyMapSerialized() {
+    chat:Message reply = toGChatReply({});
+    test:assertEquals(reply.text, "{}");
+}
+
+@test:Config
+function testToGChatReplyNonStringJsonSerialized() {
+    chat:Message reply = toGChatReply([1, 2]);
+    test:assertEquals(reply.text, "[1, 2]");
+}

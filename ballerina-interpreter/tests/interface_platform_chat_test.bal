@@ -484,3 +484,22 @@ function testBuildUserPromptSubstitutesPollResponseHeaders() returns error? {
     string prompt = check buildUserPrompt(compiled, {message: {text: "hello"}}, headers);
     test:assertEquals(prompt, "hello via abc");
 }
+
+// ============================================
+// hasEffectiveOutputSchema
+// ============================================
+
+@test:Config
+function testHasEffectiveOutputSchemaDefaultStringIsNotEffective() {
+    test:assertFalse(hasEffectiveOutputSchema({'type: "string"}));
+}
+
+@test:Config
+function testHasEffectiveOutputSchemaObjectIsEffective() {
+    test:assertTrue(hasEffectiveOutputSchema({'type: "object", properties: {text: {'type: "string"}}}));
+}
+
+@test:Config
+function testHasEffectiveOutputSchemaNonStringPrimitiveIsEffective() {
+    test:assertTrue(hasEffectiveOutputSchema({'type: "integer"}));
+}

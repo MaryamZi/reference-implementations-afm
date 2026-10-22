@@ -174,10 +174,11 @@ DEFAULT_WEBHOOK_PATH = "/webhook"
 class Polling(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    # Seconds to wait between polling cycles. 0 means "no sleep" (typical
-    # when ``timeout`` is set and the platform long-polls). Negative values
-    # would busy-spin the loop, so they are rejected at parse time.
-    interval: int = Field(default=DEFAULT_POLLING_INTERVAL_SECONDS, ge=0)
+    # Seconds to wait between polling cycles, and before retrying a failed
+    # poll. Must be positive: with 0, a platform that answers immediately
+    # (no long-poll ``timeout``, or a persistent error such as a bad token)
+    # would be polled in a tight loop. Long polling comes from ``timeout``.
+    interval: int = Field(default=DEFAULT_POLLING_INTERVAL_SECONDS, gt=0)
     timeout: int | None = Field(default=None, ge=0)
 
 

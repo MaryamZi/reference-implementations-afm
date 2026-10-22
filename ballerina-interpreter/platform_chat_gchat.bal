@@ -123,6 +123,9 @@ function attachGChatPlatformChat(http:Listener httpListener, ai:Agent agent,
         ? check compileTemplate(promptTemplate)
         : ();
     final boolean isRequestMode = interface.mode == REQUEST;
+    JSONSchema output = interface.signature.output;
+    final readonly & JSONSchema? outputSchema =
+            isRequestMode && hasEffectiveOutputSchema(output) ? output.cloneReadOnly() : ();
 
     // Placeholder bearer token: `chat:ListenerConfig.auth` is mandatory and
     // drives the outbound Chat API client, which we never invoke. The token
@@ -132,17 +135,20 @@ function attachGChatPlatformChat(http:Listener httpListener, ai:Agent agent,
     });
 
     chat:ChatService svc = svcConfig is chat:HttpEndpointUrlConfig
-        ? getGChatServiceWithHttpEndpointUrlConfig(svcConfig, isRequestMode, agent, compiledPrompt)
-        : getGChatServiceWithProjectNumberConfig(svcConfig, isRequestMode, agent, compiledPrompt);
+        ? getGChatServiceWithHttpEndpointUrlConfig(svcConfig, isRequestMode, agent, compiledPrompt,
+                outputSchema)
+        : getGChatServiceWithProjectNumberConfig(svcConfig, isRequestMode, agent, compiledPrompt,
+                outputSchema);
     check chatListener.attach(svc, ());
     return chatListener;
 }
 
 isolated function getGChatServiceWithHttpEndpointUrlConfig(chat:HttpEndpointUrlConfig annot,
-        boolean isRequestMode, ai:Agent agent,
-        readonly & CompiledTemplate? compiledPrompt) returns chat:ChatService {
+        boolean isRequestMode, ai:Agent agent, readonly & CompiledTemplate? compiledPrompt,
+        readonly & JSONSchema? outputSchema) returns chat:ChatService {
     final ai:Agent capturedAgent = agent;
     final readonly & CompiledTemplate? capturedPrompt = compiledPrompt;
+    final readonly & JSONSchema? capturedOutputSchema = outputSchema;
     final boolean capturedIsRequestMode = isRequestMode;
 
     return @chat:ServiceConfig {
@@ -155,7 +161,8 @@ isolated function getGChatServiceWithHttpEndpointUrlConfig(chat:HttpEndpointUrlC
                 return caller->respond({});
             }
             if capturedIsRequestMode {
-                return handleGChatRequestMode(capturedAgent, event, caller, capturedPrompt);
+                return handleGChatRequestMode(capturedAgent, event, caller, capturedPrompt,
+                        capturedOutputSchema);
             }
             // Notification mode: ack and dispatch in the background.
             // Google Chat does not redeliver, so retrying is pointless.
@@ -174,10 +181,11 @@ isolated function getGChatServiceWithHttpEndpointUrlConfig(chat:HttpEndpointUrlC
 }
 
 isolated function getGChatServiceWithProjectNumberConfig(chat:ProjectNumberConfig annot,
-        boolean isRequestMode, ai:Agent agent,
-        readonly & CompiledTemplate? compiledPrompt) returns chat:ChatService {
+        boolean isRequestMode, ai:Agent agent, readonly & CompiledTemplate? compiledPrompt,
+        readonly & JSONSchema? outputSchema) returns chat:ChatService {
     final ai:Agent capturedAgent = agent;
     final readonly & CompiledTemplate? capturedPrompt = compiledPrompt;
+    final readonly & JSONSchema? capturedOutputSchema = outputSchema;
     final boolean capturedIsRequestMode = isRequestMode;
 
     return @chat:ServiceConfig {
@@ -190,7 +198,8 @@ isolated function getGChatServiceWithProjectNumberConfig(chat:ProjectNumberConfi
                 return caller->respond({});
             }
             if capturedIsRequestMode {
-                return handleGChatRequestMode(capturedAgent, event, caller, capturedPrompt);
+                return handleGChatRequestMode(capturedAgent, event, caller, capturedPrompt,
+                        capturedOutputSchema);
             }
             // Notification mode: ack and dispatch in the background.
             // Google Chat does not redeliver, so retrying is pointless.
@@ -209,8 +218,8 @@ isolated function getGChatServiceWithProjectNumberConfig(chat:ProjectNumberConfi
 }
 
 isolated function handleGChatRequestMode(ai:Agent agent, chat:MessageEvent event,
-        chat:MessageCaller caller,
-        readonly & CompiledTemplate? compiledPrompt) returns error? {
+        chat:MessageCaller caller, readonly & CompiledTemplate? compiledPrompt,
+        readonly & JSONSchema? outputSchema) returns error? {
     json payload = event.toJson();
     string sessionId = getGChatSessionId(payload);
     string|error userPrompt = buildUserPrompt(compiledPrompt, payload, ());
@@ -219,7 +228,8 @@ isolated function handleGChatRequestMode(ai:Agent agent, chat:MessageEvent event
         return caller->respond({text: "Failed to evaluate prompt template"});
     }
 
-    json|InputError|AgentError result = runAgent(agent, userPrompt, sessionId = sessionId);
+    json|InputError|AgentError result = runAgent(agent, userPrompt,
+            outputSchema = outputSchema, sessionId = sessionId);
     if result is InputError {
         return caller->respond({text: result.message()});
     }
@@ -227,13 +237,21 @@ isolated function handleGChatRequestMode(ai:Agent agent, chat:MessageEvent event
         log:printError("Agent execution error", result);
         return caller->respond({text: "Agent execution failed"});
     }
-    if result is map<json> {
-        chat:Message|error msg = result.cloneWithType();
-        if msg is chat:Message {
-            return caller->respond(msg);
+    return caller->respond(toGChatReply(result));
+}
+
+// A result carrying Chat message content (`text` or `cardsV2`, e.g. from output
+// schema coercion) is sent as is; anything else becomes the message text.
+// `chat:Message` is an open record with only optional fields, so a successful
+// conversion alone does not mean the map has anything to display.
+isolated function toGChatReply(json result) returns chat:Message {
+    if result is map<json> && (result.hasKey("text") || result.hasKey("cardsV2")) {
+        chat:Message|error message = result.cloneWithType();
+        if message is chat:Message {
+            return message;
         }
     }
-    return caller->respond({text: result.toJsonString()});
+    return {text: result is string ? result : result.toJsonString()};
 }
 
 isolated function runGChatAgentDispatch(ai:Agent agent, chat:MessageEvent event,

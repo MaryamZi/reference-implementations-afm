@@ -248,9 +248,7 @@ isolated function dispatchPlatformChatRequest(http:Request req, ai:Agent agent,
         return badRequestResponse("Failed to evaluate prompt template");
     }
 
-    map<json>? effectiveOutputSchema =
-            (outputSchema?.properties !is () || outputSchema.'type != "string")
-                ? outputSchema : ();
+    map<json>? effectiveOutputSchema = hasEffectiveOutputSchema(outputSchema) ? outputSchema : ();
 
     json|InputError|AgentError result = runAgent(agent, userPrompt,
             outputSchema = effectiveOutputSchema, sessionId = sessionId);
@@ -293,6 +291,10 @@ isolated function dispatchPlatformUpdate(PlatformHandler handler, ai:Agent agent
     log:printDebug(string `Agent response: ${result.toJsonString()}`);
     return true;
 }
+
+// A plain `string` output (the default signature) needs no schema enforcement.
+isolated function hasEffectiveOutputSchema(JSONSchema outputSchema) returns boolean =>
+    outputSchema?.properties !is () || outputSchema.'type != "string";
 
 isolated function buildUserPrompt(readonly & CompiledTemplate? compiledPrompt,
         json payload, map<string|string[]>? headers) returns string|error {

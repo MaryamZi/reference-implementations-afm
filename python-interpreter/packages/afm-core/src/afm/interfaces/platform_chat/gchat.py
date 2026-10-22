@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, Self
@@ -298,11 +299,14 @@ class GChatHandler(PlatformHandler):
         return JSONResponse(status_code=202, content={"status": "accepted"})
 
     def create_request_response(self, result: str | object) -> Response:
-        # If the result is already a dict (e.g. from output schema coercion),
-        # return it directly — it should already contain the expected structure.
-        if isinstance(result, dict):
+        # A dict carrying Chat message content (e.g. from output schema
+        # coercion) is returned as is. Anything else, including a dict without
+        # ``text`` or ``cardsV2``, becomes the message text so the reply is
+        # never empty.
+        if isinstance(result, dict) and ("text" in result or "cardsV2" in result):
             return JSONResponse(content=result)
-        return JSONResponse(content={"text": result})
+        text = result if isinstance(result, str) else json.dumps(result)
+        return JSONResponse(content={"text": text})
 
 
 def _non_empty_string(value: object) -> str | None:
